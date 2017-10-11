@@ -1,0 +1,376 @@
+---
+title: "rpart.Rmd"
+author: "Logan Schneider"
+date: "September 30, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+```{r FYI, echo=FALSE}
+#print("Analyses perfomed using:")
+#R.Version()$version.string
+print("foreign, caret, rattle, rpart, rpart.plot, RColorBrewer")
+library(foreign)
+library(caret)
+#rattle install required elaborate method for depedencies install on Mac: http://marcoghislanzoni.com/blog/2014/08/29/solved-installing-rattle-r-3-1-mac-os-x-10-9/ in order for library(RGtk2) and library(cairoDevice) to install
+library(rattle)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+print("Please use the following citation information")
+citation()
+
+sessionInfo()
+```
+
+```{r read_file}
+#library(foreign)
+setwd("C:/Users/xj901087/Dropbox/Stanford_Summer_Student")
+MSLT <- read.csv("MASTER4R.csv")
+
+head(MSLT)
+levels(MSLT$diagnosis)
+MSLT$nom <- factor(MSLT$diagnosis)
+levels(MSLT$nom)
+MSLT$diagnosis2 <- relevel(MSLT$nom, ref = "4")
+#remove hypocretin measurement as it shouldn't be included in the models
+MSLTsub <- MSLT[,-2]
+#now need to remove incomplete cases from the normal controls
+nc<-MSLTsub[which(MSLTsub$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew<-rbind.data.frame(MSLTsub[which(MSLTsub$diagnosis != 4),],ncomplete)
+#defining categories by name and re-leveling to NC as the baseline
+MSLTcat <- MSLTnew
+MSLTcat$Dx <- "NA"
+MSLTcat[which(MSLTcat$diagnosis == 1),"Dx"] <- "NT1"
+MSLTcat[which(MSLTcat$diagnosis == 2),"Dx"] <- "NT2"
+MSLTcat[which(MSLTcat$diagnosis == 3),"Dx"] <- "IH"
+MSLTcat[which(MSLTcat$diagnosis == 4),"Dx"] <- "NC"
+MSLTcat$nom <- factor(MSLTcat$Dx)
+MSLTcat$diagnosis2 <- relevel(MSLTcat$nom, ref = "NC")
+#subsetting for model creation
+#seems ridiculous to include gender, age, ethnicity in these types of models because sampling was biased: MSLTglmnet <- MSLTcat[,c(28,2,4,7,8,10,12,14,16,17,18,19,20,21,22,23,24,25,26)]
+MSLTglmnet <- MSLTcat[,c(28,2,4,7,8,10,12,14,16,17)] 
+#most models require complete cases (i.e. non-sparse/no-NA data)...though rpart is robust to sparse data
+MSLTcc <- MSLTglmnet[complete.cases(MSLTglmnet),]
+summary(MSLTcc)
+```
+
+```{r define training (5/8) and test/hold-out sets (3/8), echo=FALSE}
+#set.seed(123)
+#train=sample(1:nrow(MSLTcc),round(0.625*nrow(MSLTcc)))
+#rpart.train = MSLTcc[train,]
+#rpart.train
+#rpart.test=MSLTcc[-train,]
+#rpart.test
+
+###this is better done with createDataPartition() because it ensures each category has an appropriate proportion between training and test
+#library(caret)
+set.seed(123)
+trainpart <- createDataPartition(MSLTcc$diagnosis2,
+                                 times=1,
+                                 p=0.625,
+                                 list=F)
+rpart.train <- MSLTcc[trainpart,]
+summary(rpart.train)
+rpart.test <- MSLTcc[-trainpart,]
+summary(rpart.test)
+```
+
+```{r rpart display_model for COMPLETE CASES}
+set.seed(123)
+#library(rpart); library(caret)
+model.rpart <- rpart(diagnosis2~ ., data = rpart.train, method = "class")
+summary(model.rpart)
+
+#library(RGtk2); library(cairoDevice); library(rattle); library(rpart.plot); library(RColorBrewer)
+setwd("C:/Users/xj901087/Dropbox")
+
+png(paste("rpart_model_COMPLETEcases",".png",sep=""), 
+    width = 8, 
+    height = 8, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 600)
+fancyRpartPlot(model.rpart,sub="")
+dev.off()
+```
+
+```{r rpart display_model for whole, sparse dataset}
+set.seed(123)
+trainpart <- createDataPartition(MSLTglmnet$diagnosis2,
+                                 times=1,
+                                 p=0.625,
+                                 list=F)
+rpart.SPARSEtrain <- MSLTglmnet[trainpart,]
+summary(rpart.SPARSEtrain)
+rpart.SPARSEtest <- MSLTglmnet[-trainpart,]
+summary(rpart.SPARSEtest)
+
+set.seed(123)
+#library(rpart); library(caret)
+model.SPARSErpart <- rpart(diagnosis2~ ., data = rpart.SPARSEtrain, method = "class")
+summary(model.SPARSErpart)
+
+#library(RGtk2); library(cairoDevice); library(rattle); library(rpart.plot); library(RColorBrewer)
+setwd("C:/Users/xj901087/Dropbox")
+
+png(paste("rpart_model_SPARSEdata",".png",sep=""), 
+    width = 8, 
+    height = 8, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 600
+)
+fancyRpartPlot(model.SPARSErpart,sub="")
+dev.off()
+#Ultimately a simpler model
+```
+
+```{r summarize the CC model}
+summary(model.rpart)
+print(model.rpart)
+labels(model.rpart)
+
+png(paste("R2_diff_splits_COMPLETEcases%02d",".png",sep=""), 
+    width = 4, 
+    height = 4, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 300
+)
+rsq.rpart(model.rpart) #****Plots the approximate r-square for the different splits
+dev.off()
+
+xpred.rpart(model.rpart, xval=5, return.all = FALSE) #****Gives predicted cross validation values of rpart 
+printcp(model.rpart) #***Shows CP table for model
+
+#Another way to plot the tree plot(model.rpart, uniform=TRUE, branch=0.6, margin=0.05); text(model.rpart, all=TRUE, use.n=TRUE); title("Training Set's Classification Tree")
+```
+
+```{r summarize the SPARSE model}
+summary(model.SPARSErpart)
+print(model.SPARSErpart)
+labels(model.SPARSErpart)
+
+png(paste("R2_diff_splits_SPARSEdata%02d",".png",sep=""), 
+    width = 8, 
+    height = 8, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 600
+)
+rsq.rpart(model.SPARSErpart) #****Plots the approximate r-square for the different splits
+dev.off()
+
+xpred.rpart(model.SPARSErpart, xval=5, return.all = FALSE) #****Gives predicted cross validation values of rpart 
+printcp(model.SPARSErpart) #***Shows CP table for model
+
+#Another way to plot the tree plot(model.rpart, uniform=TRUE, branch=0.6, margin=0.05); text(model.rpart, all=TRUE, use.n=TRUE); title("Training Set's Classification Tree")
+```
+
+```{r confusion matrix for COMPLETE cases}
+#Confusion matrix created
+rpart.predictions <- predict(model.rpart, rpart.test, type="class")
+model.rpart.confusionMatrix = table(rpart.test$diagnosis, rpart.predictions)
+model.rpart.confusionMatrix
+
+model.rpart.confusionMatrix.error.rate <- 1 - sum(diag(as.matrix(model.rpart.confusionMatrix))) / sum(model.rpart.confusionMatrix)
+1-model.rpart.confusionMatrix.error.rate
+
+rpartCM <- confusionMatrix(rpart.predictions, rpart.test$diagnosis2)
+rpartCM$table
+paste("rpart accuracy in COMPLETEcases TEST data:",round(rpartCM$overall[[1]],2))
+paste("rpart tree COMPLETEcases p-value:",rpartCM$overall[[6]])
+rpartCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="rpartCompleteCases",
+                         "TESTaccuracy"=rpartCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=rpartCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=rpartCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=rpartCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=rpartCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+```{r confusion matrix for SPARSE data}
+#Confusion matrix created
+rpart.SPARSEpredictions <- predict(model.SPARSErpart, rpart.SPARSEtest, type="class")
+SPARSEmodel.rpart.confusionMatrix = table(rpart.SPARSEpredictions,rpart.SPARSEtest$diagnosis)
+SPARSEmodel.rpart.confusionMatrix
+
+SPARSEmodel.rpart.confusionMatrix.error.rate <- 1 - sum(diag(as.matrix(SPARSEmodel.rpart.confusionMatrix))) / sum(SPARSEmodel.rpart.confusionMatrix)
+1-SPARSEmodel.rpart.confusionMatrix.error.rate
+
+SPARSErpartCM <- confusionMatrix(rpart.SPARSEpredictions, rpart.SPARSEtest$diagnosis2)
+SPARSErpartCM$table
+paste("rpart accuracy in SPARSEdata TEST data:",round(SPARSErpartCM$overall[[1]],2))
+paste("rpart tree SPARSEdata p-value:",SPARSErpartCM$overall[[6]])
+SPARSErpartCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="rpartSparseData",
+                         "TESTaccuracy"=SPARSErpartCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=SPARSErpartCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=SPARSErpartCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=SPARSErpartCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=SPARSErpartCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+```{r generate loss matrix to optimize rpart}
+#Creating loss matrix from similar example: http://www.di.fc.ul.pt/~jpn/r/tree/tree.html#conditional-inference-trees generated the matrix 
+lmat <- matrix(c(0,10,20,10,10,0,20,5,20,10,0,2,10,5,10,0), 
+               ncol = 4,
+               byrow = T)
+lmat
+lmatexp <- lmat
+row.names(lmatexp) <- c("aNC","aIH","aNT1","aNT2") #Actual categorization
+colnames(lmatexp) <- c("pNC","pIH","pNT1","pNT2") #Predicted categorization
+lmatexp # Notice that the loss matrix is somewhat lopsided (could be symmetric about the diagonal), because we felt that calling a normal persion hypersomnic (i.e. giving an inappropriate label) was worse than the other way around
+str(levels(MSLTcc$diagnosis2)) #confirms the ordering of the levels agrees with loss matrix
+```
+
+```{r rpart with loss-cost matrix in COMPLETEcases}
+model.rpart.loss <- rpart(diagnosis2~., data = rpart.train, parms = list(loss = lmat))
+summary(model.rpart.loss)
+rpart.predictions.loss <- predict(model.rpart.loss, rpart.test, type="class")
+table(rpart.predictions.loss,rpart.test$diagnosis2)
+
+rpartlossCM <- confusionMatrix(rpart.predictions.loss, rpart.test$diagnosis2)
+rpartlossCM$table
+paste("rpart w/loss accuracy in COMPLETEcases TEST data:",round(rpartlossCM$overall[[1]],2))
+paste("rpart w/loss tree COMPLETEcases p-value:",rpartlossCM$overall[[6]])
+rpartlossCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="rpartCompleteCasesWithLoss",
+                         "TESTaccuracy"=rpartlossCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=rpartlossCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=rpartlossCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=rpartlossCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=rpartlossCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+
+png(paste("model_rpart_lossmatrix",".png",sep=""), 
+    width = 8, 
+    height = 8, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 600
+)
+fancyRpartPlot(model.rpart.loss,sub="")
+dev.off()
+```
+
+```{r rpart with loss-cost matrix in SPARSEdata}
+model.SPARSErpart.loss <- rpart(diagnosis2~., data = rpart.SPARSEtrain, parms = list(loss = lmat))
+
+rpart.SPARSEpredictions.loss <- predict(model.SPARSErpart.loss, rpart.SPARSEtest, type="class")
+table(rpart.SPARSEpredictions.loss,rpart.SPARSEtest$diagnosis2)
+
+SPARSErpartlossCM <- confusionMatrix(rpart.SPARSEpredictions.loss, rpart.SPARSEtest$diagnosis2)
+SPARSErpartlossCM$table
+paste("rpart w/loss accuracy in SPARSE data TEST data:",
+      round(SPARSErpartlossCM$overall[[1]],2))
+paste("rpart w/loss tree SPARSE data p-value:",
+      SPARSErpartlossCM$overall[[6]])
+SPARSErpartlossCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="rpartSparseDataWithLoss",
+                         "TESTaccuracy"=SPARSErpartlossCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=SPARSErpartlossCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=SPARSErpartlossCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=SPARSErpartlossCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=SPARSErpartlossCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+
+png(paste("model_rpart_lossmatrix_SPARSEdata",".png",sep=""), 
+    width = 8, 
+    height = 8, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 600
+)
+fancyRpartPlot(model.SPARSErpart.loss,sub="")
+dev.off()
+```
+
+```{r k-fold_cross-validation function}
+k.folds <- function(k) {
+    folds <- createFolds(rpart.train$diagnosis, k = 5, list = TRUE, returnTrain = TRUE)
+    for (i in 1:5) {
+        model <- rpart(diagnosis2~.,
+                       data = rpart.train[folds[[i]],],
+                       method = "class")
+        predictions <- predict(object = model,
+                               newdata = rpart.train[-folds[[i]],],
+                               type = "class")
+        rpartAccuracies.dt <- c(rpartAccuracies.dt,
+                                confusionMatrix(predictions, rpart.train[-folds[[i]], ]$diagnosis)$overall[[1]])
+    }
+    rpartAccuracies.dt
+}
+```
+
+```{r run 5-fold CV}
+set.seed(567)
+rpartAccuracies.dt <- c()
+rpartAccuracies.dt <- k.folds(5) 
+rpartAccuracies.dt
+mean.rpartAccuracies <- mean(rpartAccuracies.dt)
+mean.rpartAccuracies
+sd.rpartAccuracies <- sd(rpartAccuracies.dt)
+sd.rpartAccuracies
+```
+
+
+```{r 200 iterations of 5-fold cross-validation}
+set.seed(567)
+accuracies.dt <- c()
+accuracies.dt <- k.folds(5) 
+accuracies.dt
+
+mean.accuracies <- mean(accuracies.dt)
+
+set.seed(567)
+v <- c()
+v <- replicate(200, k.folds(5))
+V
+accuracies.dt <- c()
+for (i in 1 : 200) { 
+  accuracies.dt <- c(accuracies.dt, v[,i])
+}
+
+write.csv(accuracies.dt, file = "rpart_200accuracies.csv")
+
+mean.accuracies <- mean(accuracies.dt)
+lci <- mean(accuracies.dt) - sd(accuracies.dt) * 1.96
+uci <- mean(accuracies.dt) + sd(accuracies.dt) * 1.96
+```

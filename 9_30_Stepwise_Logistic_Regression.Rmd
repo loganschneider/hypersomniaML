@@ -1,0 +1,1267 @@
+---
+title: "Stepwise Logistic Regression.Rmd"
+author: "Logan Schneider"
+date: "September 30, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+```{r FYI, echo=FALSE}
+#print("Analyses perfomed using:")
+#R.Version()$version.string
+print("Packages used: MASS, broom, caret, foreign, glmnet, nnet, rms, boot, prediction, ROCR, pROC, ggplot2, grid, tidyr, dplyr, scales, ggthemr, ggthemes, gridExtra, data.table")
+library(MASS)
+library(broom)
+library(caret)
+library(foreign)
+library(glmnet)
+library(nnet)
+library(rms)
+library(boot)
+library(prediction)
+library(ROCR)
+library(pROC)
+library(ggplot2)
+library(grid)
+library(tidyr)
+library(dplyr)
+library(scales)
+library(devtools)
+devtools::install_github('cttobin/ggthemr')
+library(ggthemr)
+library(ggthemes)
+library(gridExtra)
+library(data.table)
+print("Please use the following citation information")
+citation()
+
+sessionInfo()
+```
+  
+
+```{r initial data prep, echo=FALSE}
+#library(MASS)
+#library(broom)
+set.seed(101)
+setwd("C:/Users/xj901087/Dropbox/Stanford_Summer_Student")
+MSLT <- read.csv("MASTER4R.csv")
+head(MSLT)
+levels(MSLT$diagnosis)
+MSLT$nom <- factor(MSLT$diagnosis)
+levels(MSLT$nom)
+MSLT$diagnosis2 <- relevel(MSLT$nom, ref = "4")
+#remove hypocretin measurement as it shouldn't be included in the models
+MSLTsub <- MSLT[,-2]
+#now need to remove incomplete cases from the normal controls
+nc<-MSLTsub[which(MSLTsub$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew<-rbind.data.frame(MSLTsub[which(MSLTsub$diagnosis != 4),],ncomplete)
+#defining categories by name and re-leveling to NC as the baseline
+MSLTcat <- MSLTnew
+MSLTcat$Dx <- "NA"
+MSLTcat[which(MSLTcat$diagnosis == 1),"Dx"] <- "NT1"
+MSLTcat[which(MSLTcat$diagnosis == 2),"Dx"] <- "NT2"
+MSLTcat[which(MSLTcat$diagnosis == 3),"Dx"] <- "IH"
+MSLTcat[which(MSLTcat$diagnosis == 4),"Dx"] <- "NC"
+MSLTcat$nom <- factor(MSLTcat$Dx)
+MSLTcat$diagnosis2 <- relevel(MSLTcat$nom, ref = "NC")
+MSLTcat
+summary(MSLTcat)
+#subsetting for model creation
+MSLTglmnet.stepwise <- MSLTcat[,c(28,2,3,4,7,8,10,12,14,16,17,18,19,20,21,22,23,24,25,26)] 
+summary(MSLTglmnet.stepwise)
+#most models require complete cases (i.e. non-sparse/no-NA data)
+MSLTcc.stepwise <- MSLTglmnet.stepwise[complete.cases(MSLTglmnet.stepwise),]
+MSLTcc.stepwise
+summary(MSLTcc.stepwise)
+write.csv(MSLTcc.stepwise,"CCdata4demographics.csv")
+```
+
+```{r define training (5/8) and test/hold-out sets (3/8), echo=FALSE}
+#set.seed(123)
+#trainingStepwise=sample(1:nrow(MSLTcc.stepwise),round(0.625*nrow(MSLTcc.stepwise)))
+#trainStepwise = MSLTcc.stepwise[trainingStepwise,]
+#summary(trainStepwise)
+#testStepwise=MSLTcc.stepwise[-trainingStepwise,]
+#summary(testStepwise)
+
+###this is better done with createDataPartition() because it ensures each category has an appropriate proportion between training and test
+#library(caret)
+set.seed(123)
+trainpart <- createDataPartition(MSLTcc.stepwise$diagnosis2,
+                                 times=1,
+                                 p=0.625,
+                                 list=F)
+trainStepwise <- MSLTcc.stepwise[trainpart,]
+summary(trainStepwise)
+testStepwise <- MSLTcc.stepwise[-trainpart,]
+summary(testStepwise)
+```
+
+```{r perform stepwise regression on whole dataset}
+#Stepwise Logistic Regression
+#Problem occurs if model is run on empty data points--I tried to maintain the integrity of the original MSLT data set, and instead I removed columns like nom and the old diagnosis and instead kept all of hte other variables
+#library(foreign)
+#library(glmnet)
+#library(nnet)
+multinom4step <- multinom(diagnosis2 ~., data = MSLTcc.stepwise)
+summary(multinom4step)
+paste("equivalent degrees of freedom:",round(extractAIC(multinom4step)[1],2))
+paste("AIC:",round(extractAIC(multinom4step)[2],2))
+
+#Now perform forward AND backward stepwise regression on the whole dataset
+#Lower bound model is null (i.e. only intercept): ~1
+#Upper bound model is including all variables and expected interactions
+multinomStep <- stepAIC(multinom4step, direction="both", scope = list(upper= ~Top+SE+MSL+TST*MSL+TST+N1per+N1per*TST+N2per+N2per*TST+N3per+N3per*TST+REMper+REMper*TST+REMLat+Asian+Black+Unknown+Hispanic+NativeAmerican+Other+PacificIslander+White+Gender+Age, lower= ~1))
+summary(multinomStep)
+multinomStep$anova
+paste("complete data step AIC:",round(multinomStep$AIC,2))
+paste("complete data step deviance:",round(multinomStep$deviance,2))
+
+#library(rms)
+trial <- lrm(multinomStep)
+print(trial) 
+paste("complete data step R2:",round(trial$stats[[10]],2))
+```
+
+
+```{r now generate model on train and validate on test}
+#library(caret)
+
+#generate model on training set
+#Set upper bound to full model (and specifying interaction variables like TST*N2per), and lower bound being the null model; model optimizes based on AIC minimization
+multinom4step.pred <- multinom(diagnosis2~., data = trainStepwise)
+paste("TRAIN MULTINOM data step AIC:",round(multinom4step.pred$AIC,2))
+paste("TRAIN MULTINOM data step deviance:",round(multinom4step.pred$deviance,2))
+
+multinomStep.pred <- stepAIC(multinom4step.pred, direction="both", scope = list(upper= ~Top+SE+MSL+TST*MSL+TST+N1per+N1per*TST+N2per+N2per*TST+N3per+N3per*TST+REMper+REMper*TST+REMLat+Asian+Black+Unknown+Hispanic+NativeAmerican+Other+PacificIslander+White+Gender+Age, lower= ~1)) #***9_4 Might not be possible to plot the interaction
+
+#examine this model for similarity to the model generated on the whole dataset
+summary(multinomStep.pred)
+multinomStep.pred$anova #don't really believe that ethicity plays a roll, but it's controlled for now
+paste("TRAIN data step AIC:",round(multinomStep.pred$AIC,2))
+paste("TRAIN data step deviance:",round(multinomStep.pred$deviance,2))
+trial <- lrm(multinomStep.pred)
+print(trial) 
+paste("TRAIN data step R2:",round(trial$stats[[10]],2))
+
+```
+
+```{R}
+#now predict on the test/hold-out dataset
+predict_stepwise <- predict(multinomStep.pred, testStepwise)
+
+#generating confusion matrix
+stepwise.confusionMatrix = table(predict_stepwise, testStepwise$diagnosis2)
+stepwise.confusionMatrix
+stepwise.confusionMatrix.error.rate <- 1 - sum(diag(as.matrix(stepwise.confusionMatrix))) / sum(stepwise.confusionMatrix)
+1-stepwise.confusionMatrix.error.rate
+#ignore this, as confusionMatrix does the legwork we need
+
+stepCM <- confusionMatrix(predict_stepwise, testStepwise$diagnosis2)
+stepCM
+stepCM$table
+paste("stepwise accuracy in TEST data:",round(stepCM$overall[[1]],2))
+paste("stepwise p-value:",stepCM$overall[[6]])
+stepCM$byClass
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="StepFull",
+                         "TESTaccuracy"=stepCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=stepCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=stepCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=stepCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=stepCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+```{r now generate model on TRAINING data with 5-fold CV}
+#define fold-generating function to ensure even distribution of data across folds
+k.folds <- function(k) {
+    folds <- createFolds(trainStepwise$diagnosis2,
+                         k = k,
+                         list = TRUE,
+                         returnTrain = TRUE)
+    for (i in 1:5) {
+        multinom4step.pred <- multinom(diagnosis2 ~.,
+                                       data=trainStepwise[folds[[i]],],
+                                       method = "class")
+        multinomStep.cv <- stepAIC(multinom4step.pred,
+                                   direction="both")
+        multinom4step.cv.predictions <- predict(object = multinomStep.cv,
+                                                newdata = trainStepwise[-folds[[i]],],
+                                                type = "class")
+        #collect accuracies
+        accuracies.dt <- c(accuracies.dt, 
+                           confusionMatrix(multinom4step.cv.predictions,
+                                           trainStepwise[-folds[[i]],]$diagnosis2)$overall[[1]])
+    }
+    accuracies.dt
+}
+```
+
+```{r run the 5-fold CV for one iteration}
+set.seed(567)
+accuracies.dt <- c()
+accuracies.dt <- k.folds(5)
+accuracies.dt
+mean.accuracies <- mean(accuracies.dt)
+paste("average accuracy from 1 iteration of 5-fold CV:",round(mean.accuracies,2))
+```
+
+```{r can try to run the 5-fold CV for 200 iters, but ran into problems}
+set.seed(567)
+v <- c()
+v <- replicate(200, k.folds(5))
+accuracies.dt <- c()
+for (i in 1 : 200) { 
+  accuracies.dt <- c(accuracies.dt, v[,i])
+}
+
+mean.accuracies <- mean(accuracies.dt)
+lci <- mean(accuracies.dt) - sd(accuracies.dt) * 1.96
+uci <- mean(accuracies.dt) + sd(accuracies.dt) * 1.96
+```
+
+```{r try with 25 iterations x8}
+accuracies.dt <- c()
+set.seed(567)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.567 <- c()
+for (i in 1 : 25) { 
+  accuracies.567 <- c(accuracies.567, v[,i])
+}
+save.image(file="reboot.567.RData")
+accuracies.dt <- c()
+set.seed(569)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.568 <- accuracies.567
+for (i in 1 : 25) { 
+  accuracies.568 <- c(accuracies.568, v[,i])
+}
+save.image(file="reboot.568.RData")
+accuracies.dt <- c()
+set.seed(571)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.569 <- accuracies.568
+for (i in 1 : 25) { 
+  accuracies.569 <- c(accuracies.569, v[,i])
+}
+save.image(file="reboot.569.RData")
+accuracies.dt <- c()
+set.seed(574)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.570 <- accuracies.569
+for (i in 1 : 25) { 
+  accuracies.570 <- c(accuracies.570, v[,i])
+}
+save.image(file="reboot.570.RData")
+accuracies.dt <- c()
+set.seed(576)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.571 <- accuracies.570
+for (i in 1 : 25) { 
+  accuracies.571 <- c(accuracies.571, v[,i])
+}
+save.image(file="reboot.571.RData")
+accuracies.dt <- c()
+set.seed(579)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.572 <- accuracies.571
+for (i in 1 : 25) { 
+  accuracies.572 <- c(accuracies.572, v[,i])
+}
+save.image(file="reboot.572.RData")
+accuracies.dt <- c()
+set.seed(586)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.573 <- accuracies.572
+for (i in 1 : 25) { 
+  accuracies.573 <- c(accuracies.573, v[,i])
+}
+save.image(file="reboot.573.RData")
+accuracies.dt <- c()
+set.seed(599)
+v <- c()
+v <- replicate(25, k.folds(5))
+accuracies.574 <- accuracies.573
+for (i in 1 : 25) { 
+  accuracies.574 <- c(accuracies.574, v[,i])
+}
+save.image(file="stepwise200iter.RData")
+accuracies.dt <- accuracies.574
+
+write.csv(accuracies.dt,file="200iter_step_accuracies.csv",row.names = F,col.names = "step")
+
+mean.accuracies <- mean(accuracies.dt)
+mean.accuracies
+lci <- mean(accuracies.dt) - sd(accuracies.dt) * 1.96
+lci
+uci <- mean(accuracies.dt) + sd(accuracies.dt) * 1.96
+uci
+```
+
+```{r 8/7 ROC curve}
+#ROC curve Trial
+MSLT_ROC <- read.csv("MASTER4R_ROCcurve.csv")
+summary(MSLT_ROC)
+head(MSLT_ROC)
+levels(MSLT_ROC$diagnosis)
+MSLT_ROC$nom <- factor(MSLT_ROC$diagnosis)
+levels(MSLT_ROC$nom)
+MSLT_ROC$diagnosis2 <- relevel(MSLT_ROC$nom, ref = "4")
+MSLTsub_ROC <- MSLT_ROC[,-6]
+nc<-MSLTsub_ROC[which(MSLTsub_ROC$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew_ROC<-rbind.data.frame(MSLTsub_ROC[which(MSLTsub_ROC$diagnosis != 4),],ncomplete)
+summary(MSLTnew_ROC)
+MSLTglmnet_ROC <- MSLTnew_ROC[,c(25,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23)] 
+MSLTcc_ROC <- MSLTglmnet_ROC[complete.cases(MSLTglmnet_ROC),]
+summary(MSLTcc_ROC) ###9/30 where is Age?
+#library(caret)
+#set the trian function parameters: 5-fold cross validation, returning all summary metrics
+fitControl = trainControl(method="cv", number=5, returnResamp = "all")
+```
+
+```{r category NT1 vs others}
+###9/30 please always include the source of your methods, so I can check, when running into errors
+#NT1 vs. others
+MSLTcc_ROC_NT1<-MSLTcc_ROC[,c(2,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23)]
+summary(MSLTcc_ROC_NT1)
+MSLTcc_ROC_NT1$nom <- factor(MSLTcc_ROC_NT1$NT1)
+levels(MSLTcc_ROC_NT1$nom)
+summary(MSLTcc_ROC_NT1)
+MSLTcc_ROC_NT1$NT1 <- relevel(MSLTcc_ROC_NT1$nom, ref = "0")
+MSLTcc_ROC_NT1 <- MSLTcc_ROC_NT1[,-20]
+summary(MSLTcc_ROC_NT1)
+
+#training/test partitioning
+set.seed(123)
+train_ROC_NT1 <- createDataPartition(MSLTcc_ROC_NT1$NT1,
+                                     times=1,
+                                     p=0.625,
+                                     list=F)
+stepwiseTrain_ROC_NT1 = MSLTcc_ROC_NT1[train_ROC_NT1,]
+summary(stepwiseTrain_ROC_NT1)
+stepwiseTest_ROC_NT1=MSLTcc_ROC_NT1[-train_ROC_NT1,]
+summary(stepwiseTest_ROC_NT1)
+set.seed(123)
+train.test_ROC_NT1 <- createDataPartition(stepwiseTest_ROC_NT1$NT1,
+                                     times=1,
+                                     p=0.5,
+                                     list=F)
+stepwiseTest.train_ROC_NT1=stepwiseTest_ROC_NT1[train.test_ROC_NT1,]
+stepwiseTest.test_ROC_NT1=stepwiseTest_ROC_NT1[-train.test_ROC_NT1,]
+
+#library(caret)
+#library(foreign)
+#library(glmnet)
+#library(nnet)
+multinom4step.ROC.NT1 <- multinom(NT1 ~., data = stepwiseTrain_ROC_NT1)
+
+#library(MASS)
+multinomStep.ROC.NT1 <- stepAIC(multinom4step.ROC.NT1, 
+                                direction="both", 
+                                scope = list(upper= ~Top+SE+MSL+TST*MSL+TST+N1per+N1per*TST+N2per+N2per*TST+N3per+N3per*TST+REMper+REMper*TST+REMLat+Asian+Black+Unknown+Hispanic+NativeAmerican+Other+PacificIslander+White+Gender+Age, lower= ~1)) #The model works and the results seem very understandable, but I was wondering about the scope function--I'm confused as to how I should indicated "upper" and "lower" even though I read the Details section in the ?stepAIC file. I left it out, and the model still seems to work and give us results that we expect, but I wasn't sure if this was something that I could do to better my model...as mentioned below, you specified this above, so you should do the same (or just not waste the CPU time duplicating it)
+###9/30 it's not even clear why it's here, as you already did all of the model generation above, so just use those models
+multinomStep.ROC.NT1
+multinomStep.ROC.NT1$anova
+summary(multinomStep.ROC.NT1)
+
+#summary_multinomStep.ROC.NT1 <- summary(multinomStep.ROC.NT1)
+#list(summary_multinomStep.ROC.NT1$coefficient, 
+#     round(1-(summary_multinomStep.ROC.NT1$deviance/summary_multinomStep.ROC.NT1$null.devaince), 2)) ###9/30, there is no null deviance from this model, so it doesn't make sense to divide by it
+
+stepwise.predict.ROC.NT1 <- predict(multinomStep.ROC.NT1, stepwiseTest.train_ROC_NT1)
+stepwise.predict.ROC.NT1
+str(stepwise.predict.ROC.NT1)
+confusionMatrix(stepwise.predict.ROC.NT1, stepwiseTest.train_ROC_NT1$NT1)
+
+#library(boot)
+#library(ROCR)
+#library(ggplot2)
+
+stepwise.predict.ROC.NT1.2 <- predict(multinomStep.ROC.NT1, stepwiseTest.train_ROC_NT1, type = "probs")
+stepwise.predict.ROC.NT1.2
+rocplot = function(stepwise.predict.ROC.NT1.2,truth, ...){
+  predob=prediction(stepwise.predict.ROC.NT1.2,truth)
+  perf=performance(predob,"tpr","fpr")
+  auc=performance(predob,"auc")@y.values
+  plot(perf,main = auc)
+  plot(perf, colorize=T)
+  plot(perf, avg="threshold", spread.estimate="stddev", colorize=T)
+}
+
+png("ROC_NT1vOther_color%02d.png",
+    width = 8,
+    height = 8,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+rocplot(stepwise.predict.ROC.NT1.2, stepwiseTest.train_ROC_NT1$NT1)
+dev.off()
+
+stepwise.rocCurve.NT1 <- roc(response = stepwiseTest.train_ROC_NT1$NT1,
+                             predictor = stepwise.predict.ROC.NT1.2,
+                             levels = rev(levels(stepwiseTest.train_ROC_NT1$NT1)))
+png("ROC_NT1vOther_bw%02d.png",
+    width = 8,
+    height = 8,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+plot(stepwise.rocCurve.NT1)
+dev.off()
+paste("ROC curve AUC for NT1 vs others:",round(auc(stepwise.rocCurve.NT1),2))
+```
+
+#ROC curves plotted for NT1 vs others
+```{r ROC NT1 v others, echo=FALSE}
+rocplot(stepwise.predict.ROC.NT1.2, stepwiseTest.train_ROC_NT1$NT1)
+plot(stepwise.rocCurve.NT1)
+```
+
+```{r category (NT1, NT2, IH, NC) vs others}
+dirpath <- getwd()
+if(!dir.exists("Stepwise_ROCplots")) {
+    dir.create("Stepwise_ROCplots")
+}
+
+catlist <- names(MSLTcc_ROC)[2:5]
+MSLTccsub <- MSLTcc_ROC[,c(6:ncol(MSLTcc_ROC))]
+for (i in catlist) {
+    MSLTcc_ROC_cat <- cbind(MSLTcc_ROC[,i],MSLTccsub)
+    names(MSLTcc_ROC_cat)[1] <- i
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat$nom <- as.factor(MSLTcc_ROC_cat[,i])
+    levels(MSLTcc_ROC_cat$nom)
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat[,i] <- relevel(MSLTcc_ROC_cat$nom, ref = "0")
+    MSLTcc_ROC_cat <- MSLTcc_ROC_cat[,-ncol(MSLTcc_ROC_cat)]
+    summary(MSLTcc_ROC_cat)
+    
+    #training/test partitioning
+    set.seed(123)
+    train_ROC_cat <- createDataPartition(MSLTcc_ROC_cat[,i],
+                                         times=1,
+                                         p=0.625,
+                                         list=F)
+    stepwiseTrain_ROC_cat = MSLTcc_ROC_cat[train_ROC_cat,]
+    summary(stepwiseTrain_ROC_cat)
+    stepwiseTest_ROC_cat=MSLTcc_ROC_cat[-train_ROC_cat,]
+    summary(stepwiseTest_ROC_cat)
+    set.seed(123)
+    train.test_ROC_cat <- createDataPartition(stepwiseTest_ROC_cat[,i],
+                                         times=1,
+                                         p=0.5,
+                                         list=F)
+    stepwiseTest.train_ROC_cat=stepwiseTest_ROC_cat[train.test_ROC_cat,]
+    stepwiseTest.test_ROC_cat=stepwiseTest_ROC_cat[-train.test_ROC_cat,]
+    
+    cat_formula <- noquote(paste(i,"~."))
+    #multinom4step.ROC.cat <- multinom(cat_formula, data = stepwiseTrain_ROC_cat) ###Needed to change to logistic regression (as we've made the process binary here)
+    logistic4step.ROC.cat <- glm(cat_formula,
+                                family=binomial(link='logit'),
+                                data = stepwiseTrain_ROC_cat)
+    
+    logisticStep.ROC.cat <- stepAIC(logistic4step.ROC.cat, 
+                                    direction="both", 
+                                    scope = list(upper= ~Top+SE+MSL+TST*MSL+TST+N1per+N1per*TST+N2per+N2per*TST+N3per+N3per*TST+REMper+REMper*TST+REMLat+Asian+Black+Unknown+Hispanic+NativeAmerican+Other+PacificIslander+White+Gender, lower= ~1))
+    ###Add Age back into upper bound, once it's added back into MASTER4R_ROCcurve.csv
+    logisticStep.ROC.cat
+    logisticStep.ROC.cat$anova
+    summary(logisticStep.ROC.cat)
+    
+    #summary_multinomStep.ROC.cat <- summary(multinomStep.ROC.cat)
+    #list(summary_multinomStep.ROC.cat$coefficient, 
+    #     round(1-(summary_multinomStep.ROC.cat$deviance/summary_multinomStep.ROC.cat$null.devaince), 2)) ###9/30, there is no null deviance from this model, so it doesn't make sense to divide by it
+    
+    stepwise.predict.ROC.cat <- predict(logisticStep.ROC.cat,
+                                        stepwiseTest_ROC_cat,
+                                        type="response")
+    stepwise.predict.ROC.cat
+    str(stepwise.predict.ROC.cat)
+    fitted.results <- ifelse(stepwise.predict.ROC.cat > 0.35,1,0)
+    table(fitted.results)
+    misClasificError <- mean(fitted.results != stepwiseTest_ROC_cat[,i])
+    p <- predict(logisticStep.ROC.cat,
+                 newdata=stepwiseTest_ROC_cat,
+                 type="response")
+    pr <- prediction(p, stepwiseTest_ROC_cat[,i])
+    prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+    plot(prf)
+
+    confusionMatrix(fitted.results, stepwiseTest_ROC_cat[,i])
+    
+    stepwise.predict.ROC.cat.2 <- predict(logisticStep.ROC.cat,
+                                          stepwiseTest_ROC_cat,
+                                          type = "response")
+    stepwise.predict.ROC.cat.2
+    rocplot = function(stepwise.predict.ROC.cat.2,truth, ...){
+      predob=prediction(stepwise.predict.ROC.cat.2,truth)
+      perf=performance(predob,"tpr","fpr")
+      auc=performance(predob,"auc")@y.values
+      plot(perf,main = auc)
+      plot(perf, colorize=T)
+      plot(perf, avg="threshold", spread.estimate="stddev", colorize=T)
+    }
+    
+    setwd(paste(dirpath,"Stepwise_ROCplots",sep="/"))
+    
+    png(paste("ROC_",i,"vOther_color%02d.png",sep=""),
+        width = 4,
+        height = 4,
+        units = 'in',
+        bg = "transparent",
+        res = 300)
+    rocplot(stepwise.predict.ROC.cat.2, stepwiseTest_ROC_cat[,i])
+    dev.off()
+    
+    stepwise.rocCurve.cat <- roc(response = stepwiseTest_ROC_cat[,i],
+                                 predictor = stepwise.predict.ROC.cat.2,
+                                 levels = rev(levels(stepwiseTest_ROC_cat[,i])))
+    png(paste("ROC_",i,"vOther_bw%02d.png",sep=""),
+        width = 4,
+        height = 4,
+        units = 'in',
+        bg = "transparent",
+        res = 300)
+    plot(stepwise.rocCurve.cat)
+    dev.off()
+    paste("ROC curve AUC for",i,"vs others:",round(auc(stepwise.rocCurve.cat),2))
+    
+    setwd(dirpath)
+}
+```
+
+```{r now doing iterative univariate binomial logistic regression}
+NT1FPcost <- 100
+NT1FNcost <- 200
+NT2FPcost <- 40
+NT2FNcost <- 20
+IHFPcost <- 60
+IHFNcost <- 5
+NCFPcost <- 111
+NCFNcost <- 115
+#Make cost matrix for reference
+costmat <- matrix(c(100,40,60,111,200,20,5,115), 
+               ncol = 4,
+               byrow = T)
+row.names(costmat) <- c("FP","FN")
+colnames(costmat) <- c("NT1","NT2","IH","NC")
+costmat
+
+cutthresh <- data.frame("Category"=character(0),
+                        "Variable"=character(0),
+                        "AUC"=numeric(0),
+                        "Cutpoint"=numeric(0),
+                        "Threshold"=numeric(0),
+                        stringsAsFactors = F)
+                        
+catlist <- names(MSLTcc_ROC)[2:5]
+MSLTccsub <- MSLTcc_ROC[,c(6:14)]
+varlist <- names(MSLTccsub)
+k=1
+for (i in catlist) {
+    for (j in varlist) {
+        MSLTcc_ROC_cat <- cbind(MSLTcc_ROC[,i],MSLTccsub)
+        names(MSLTcc_ROC_cat)[1] <- i
+        summary(MSLTcc_ROC_cat)
+        MSLTcc_ROC_cat$nom <- factor(MSLTcc_ROC_cat[,i])
+        levels(MSLTcc_ROC_cat$nom)
+        summary(MSLTcc_ROC_cat)
+        MSLTcc_ROC_cat[,i] <- relevel(MSLTcc_ROC_cat$nom, ref = "0")
+        MSLTcc_ROC_cat <- MSLTcc_ROC_cat[,-20]
+        summary(MSLTcc_ROC_cat)
+        
+        #training/test partitioning
+        set.seed(123)
+        train_ROC_cat <- createDataPartition(MSLTcc_ROC_cat[,i],
+                                             times=1,
+                                             p=0.625,
+                                             list=F)
+        stepwiseTrain_ROC_cat = MSLTcc_ROC_cat[train_ROC_cat,]
+        summary(stepwiseTrain_ROC_cat)
+        stepwiseTest_ROC_cat=MSLTcc_ROC_cat[-train_ROC_cat,]
+        summary(stepwiseTest_ROC_cat)
+        set.seed(123)
+        train.test_ROC_cat <- createDataPartition(stepwiseTest_ROC_cat[,i],
+                                             times=1,
+                                             p=0.5,
+                                             list=F)
+        stepwiseTest.train_ROC_cat=stepwiseTest_ROC_cat[train.test_ROC_cat,]
+        stepwiseTest.test_ROC_cat=stepwiseTest_ROC_cat[-train.test_ROC_cat,]
+        
+        cat_formula <- noquote(paste(i,"~",j))
+        #Using the following methods: https://www.r-bloggers.com/how-to-perform-a-logistic-regression-in-r/
+        logistic.ROC.cat <- glm(cat_formula,
+                                family=binomial(link='logit'),
+                                data = stepwiseTrain_ROC_cat)
+        summary(logistic.ROC.cat)
+        beta0 <- logistic.ROC.cat$coefficients[[1]]
+        beta1 <- logistic.ROC.cat$coefficients[[2]]
+        
+        stepwise.predict.ROC.cat <- predict(logistic.ROC.cat,
+                                            newdata=stepwiseTest_ROC_cat[,c(i,j)],
+                                            type="response")
+        stepwise.predict.ROC.cat
+        str(stepwise.predict.ROC.cat)
+        
+        library(ROCR)
+        fitted.results <- ifelse(stepwise.predict.ROC.cat > 0.1,1,0)
+        table(fitted.results)
+        misClasificError <- mean(fitted.results != stepwiseTest_ROC_cat[,i])
+        p <- predict(logistic.ROC.cat,
+                     newdata=stepwiseTest_ROC_cat[,c(i,j)],
+                     type="response")
+        pr <- prediction(p, stepwiseTest_ROC_cat[,i])
+        prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+        plot(prf)
+
+        confusionMatrix(fitted.results, stepwiseTest_ROC_cat[,i])
+        
+        stepwise.predict.ROC.cat.2 <- predict(logistic.ROC.cat,
+                                              newdata=stepwiseTest_ROC_cat[,c(i,j)],
+                                              type = "response")
+        stepwise.predict.ROC.cat.2
+    
+        #Using this method to get optimal cutpoint: https://www.r-bloggers.com/a-small-introduction-to-the-rocr-package/
+        predcat <- prediction(stepwise.predict.ROC.cat.2,
+                              stepwiseTest_ROC_cat[,i])
+        perfcat <- performance(predcat,"tpr","fpr")
+        opt.cut = function(perf, pred) {
+            cut.ind = mapply(FUN=function(x, y, p){
+                d = (x - 0)^2 + (y-1)^2
+                ind = which(d == min(d))
+                c(sensitivity = y[[ind]],
+                  specificity = 1-x[[ind]],
+                  cutoff = p[[ind]])
+            }, perf@x.values, perf@y.values, pred@cutoffs)
+        }
+        print(opt.cut(perfcat, predcat))
+        
+        #Now attempt to get a cutpoint with the category-specific costs
+        cost.perf = performance(predcat,
+                                "cost",
+                                cost.fp = costmat[1,i],
+                                cost.fn = costmat[2,i])
+        roc.perf = performance(predcat,measure="tpr",x.measure="fpr")
+        plot(roc.perf); abline(a=0,b=1)
+        plot(cost.perf)
+        catcut <- opt.cut(cost.perf,predcat)[3]
+        #catcut <- predcat@cutoffs[[1]][which.min(cost.perf@y.values[[1]])]
+        TPFPcut <- opt.cut(roc.perf,predcat)[3]
+        catthresh <- (-log(1/TPFPcut - 1) - beta0)/beta1
+        
+        rocplot = function(stepwise.predict.ROC.cat.2,truth, ...) {
+            predob=prediction(stepwise.predict.ROC.cat.2,truth)
+            perf=performance(predob,"tpr","fpr")
+            auc=performance(predob,"auc")@y.values
+            plot(perf,main = auc)
+            plot(perf, colorize=T)
+            plot(perf, avg="threshold", spread.estimate="stddev", colorize=T)
+        }
+        
+        setwd(paste(dirpath,"Stepwise_ROCplots",sep="/"))
+        
+        png(paste(j,"_ROC_",i,"vOther_color%02d.png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+        rocplot(stepwise.predict.ROC.cat.2, stepwiseTest_ROC_cat[,i])
+        dev.off()
+        
+        stepwise.rocCurve.cat <- roc(response = stepwiseTest_ROC_cat[,i],
+                                     predictor = stepwise.predict.ROC.cat.2,
+                                     levels = rev(levels(stepwiseTest_ROC_cat[,i])))
+        png(paste(j,"_ROC_",i,"vOther_bw%02d.png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+        plot(stepwise.rocCurve.cat)
+        dev.off()
+        paste("ROC curve AUC for",j,"in",i,"vs others:",round(auc(stepwise.rocCurve.cat),2))
+        
+        setwd(dirpath)
+        
+        cutthresh[k,"Category"] <- i
+        cutthresh[k,"Variable"] <- j
+        cutthresh[k,"AUC"] <- round(auc(stepwise.rocCurve.cat),2)
+        cutthresh[k,"Cutpoint"] <- round(catcut,2)
+        cutthresh[k,"Threshold"] <- round(catthresh,2)
+        k=k+1
+    }
+}
+write.table(cutthresh,file = "UNIvariate_thresholds.txt",row.names = F,quote = F)
+```
+
+#Since we're just trying to find the optimal cutpoint in a statistically inaccurate way, I just wanted to check these methods with generating and assessing the model on the whole dataset (i.e. all train)
+```{r category (NT1, NT2, IH, NC) vs others}
+dirpath <- getwd()
+if(!dir.exists("Stepwise_ROCplots")) {
+    dir.create("Stepwise_ROCplots")
+}
+
+catlist <- names(MSLTcc_ROC)[2:5]
+MSLTccsub <- MSLTcc_ROC[,c(6:23)]
+for (i in catlist) {
+    MSLTcc_ROC_cat <- cbind(MSLTcc_ROC[,i],MSLTccsub)
+    names(MSLTcc_ROC_cat)[1] <- i
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat$nom <- factor(MSLTcc_ROC_cat[,i])
+    levels(MSLTcc_ROC_cat$nom)
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat[,i] <- relevel(MSLTcc_ROC_cat$nom, ref = "0")
+    MSLTcc_ROC_cat <- MSLTcc_ROC_cat[,-20]
+    summary(MSLTcc_ROC_cat)
+    
+    cat_formula <- noquote(paste(i,"~."))
+    logistic4step.ROC.cat <- glm(cat_formula,
+                                family=binomial(link='logit'),
+                                data = MSLTcc_ROC_cat)
+    
+    logisticStep.ROC.cat <- stepAIC(logistic4step.ROC.cat, 
+                                    direction="both", 
+                                    scope = list(upper= ~Top+SE+MSL+TST*MSL+TST+N1per+N1per*TST+N2per+N2per*TST+N3per+N3per*TST+REMper+REMper*TST+REMLat+Asian+Black+Unknown+Hispanic+NativeAmerican+Other+PacificIslander+White+Gender, lower= ~1))
+    ###Add Age back into upper bound, once it's added back into MASTER4R_ROCcurve.csv
+    logisticStep.ROC.cat
+    logisticStep.ROC.cat$anova
+    summary(logisticStep.ROC.cat)
+    
+    #summary_multinomStep.ROC.cat <- summary(multinomStep.ROC.cat)
+    #list(summary_multinomStep.ROC.cat$coefficient, 
+    #     round(1-(summary_multinomStep.ROC.cat$deviance/summary_multinomStep.ROC.cat$null.devaince), 2)) ###9/30, there is no null deviance from this model, so it doesn't make sense to divide by it
+    
+    stepwise.predict.ROC.cat <- predict(logisticStep.ROC.cat,
+                                        MSLTcc_ROC_cat,
+                                        type="response")
+    stepwise.predict.ROC.cat
+    str(stepwise.predict.ROC.cat)
+    fitted.results <- ifelse(stepwise.predict.ROC.cat > 0.35,1,0)
+    table(fitted.results)
+    misClasificError <- mean(fitted.results != MSLTcc_ROC_cat[,i])
+    p <- predict(logisticStep.ROC.cat,
+                 newdata=MSLTcc_ROC_cat,
+                 type="response")
+    pr <- prediction(p, MSLTcc_ROC_cat[,i])
+    prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+    plot(prf)
+
+    confusionMatrix(fitted.results, MSLTcc_ROC_cat[,i])
+    
+    stepwise.predict.ROC.cat.2 <- predict(logisticStep.ROC.cat,
+                                          MSLTcc_ROC_cat,
+                                          type = "response")
+    stepwise.predict.ROC.cat.2
+    rocplot = function(stepwise.predict.ROC.cat.2,truth, ...){
+      predob=prediction(stepwise.predict.ROC.cat.2,truth)
+      perf=performance(predob,"tpr","fpr")
+      auc=performance(predob,"auc")@y.values
+      plot(perf,main = auc)
+      plot(perf, colorize=T)
+      plot(perf, avg="threshold", spread.estimate="stddev", colorize=T)
+    }
+    
+    setwd(paste(dirpath,"Stepwise_ROCplots",sep="/"))
+    
+    png(paste("ROC_",i,"vOther_color%02d.png",sep=""),
+        width = 4,
+        height = 4,
+        units = 'in',
+        bg = "transparent",
+        res = 300)
+    rocplot(stepwise.predict.ROC.cat.2, MSLTcc_ROC_cat[,i])
+    dev.off()
+    
+    stepwise.rocCurve.cat <- roc(response = MSLTcc_ROC_cat[,i],
+                                 predictor = stepwise.predict.ROC.cat.2,
+                                 levels = rev(levels(MSLTcc_ROC_cat[,i])))
+    png(paste("ROC_",i,"vOther_bw%02d.png",sep=""),
+        width = 4,
+        height = 4,
+        units = 'in',
+        bg = "transparent",
+        res = 300)
+    plot(stepwise.rocCurve.cat)
+    dev.off()
+    paste("ROC curve AUC for",i,"vs others:",round(auc(stepwise.rocCurve.cat),2))
+    
+    setwd(dirpath)
+}
+```
+
+```{r now doing iterative univariate binomial logistic regression}
+NT1FPcost <- 100
+NT1FNcost <- 200
+NT2FPcost <- 40
+NT2FNcost <- 20
+IHFPcost <- 60
+IHFNcost <- 5
+NCFPcost <- 111
+NCFNcost <- 115
+#Make cost matrix for reference
+costmat <- matrix(c(100,40,60,111,200,20,5,115), 
+               ncol = 4,
+               byrow = T)
+row.names(costmat) <- c("FP","FN")
+colnames(costmat) <- c("NT1","NT2","IH","NC")
+costmat
+
+cutthresh <- data.frame("Category"=character(0),
+                        "Variable"=character(0),
+                        "AUC"=numeric(0),
+                        "Cutpoint"=numeric(0),
+                        "Threshold"=numeric(0),
+                        stringsAsFactors = F)
+                        
+catlist <- names(MSLTcc_ROC)[2:5]
+MSLTccsub <- MSLTcc_ROC[,c(6:14)]
+varlist <- names(MSLTccsub)
+k=1
+for (i in catlist) {
+    for (j in varlist) {
+        MSLTcc_ROC_cat <- cbind(MSLTcc_ROC[,i],MSLTccsub)
+        names(MSLTcc_ROC_cat)[1] <- i
+        summary(MSLTcc_ROC_cat)
+        MSLTcc_ROC_cat$nom <- factor(MSLTcc_ROC_cat[,i])
+        levels(MSLTcc_ROC_cat$nom)
+        summary(MSLTcc_ROC_cat)
+        MSLTcc_ROC_cat[,i] <- relevel(MSLTcc_ROC_cat$nom, ref = "0")
+        MSLTcc_ROC_cat <- MSLTcc_ROC_cat[,-20]
+        summary(MSLTcc_ROC_cat)
+        
+        cat_formula <- noquote(paste(i,"~",j))
+        #Using the following methods: https://www.r-bloggers.com/how-to-perform-a-logistic-regression-in-r/
+        logistic.ROC.cat <- glm(cat_formula,
+                                family=binomial(link='logit'),
+                                data = MSLTcc_ROC_cat)
+        summary(logistic.ROC.cat)
+        beta0 <- logistic.ROC.cat$coefficients[[1]]
+        beta1 <- logistic.ROC.cat$coefficients[[2]]
+        
+        stepwise.predict.ROC.cat <- predict(logistic.ROC.cat,
+                                            newdata=MSLTcc_ROC_cat[,c(i,j)],
+                                            type="response")
+        stepwise.predict.ROC.cat
+        str(stepwise.predict.ROC.cat)
+        
+        library(ROCR)
+        #Choosing arbitrary threshold to define a call
+        fitted.results <- ifelse(stepwise.predict.ROC.cat > 0.1,1,0)
+        table(fitted.results)
+        misClasificError <- mean(fitted.results != MSLTcc_ROC_cat[,i])
+        p <- predict(logistic.ROC.cat,
+                     newdata=MSLTcc_ROC_cat[,c(i,j)],
+                     type="response")
+        pr <- prediction(p, MSLTcc_ROC_cat[,i])
+        prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+        plot(prf)
+
+        confusionMatrix(fitted.results, MSLTcc_ROC_cat[,i])
+        
+        stepwise.predict.ROC.cat.2 <- predict(logistic.ROC.cat,
+                                              newdata=MSLTcc_ROC_cat[,c(i,j)],
+                                              type = "response")
+        stepwise.predict.ROC.cat.2
+    
+        #Using this method to get optimal cutpoint: https://www.r-bloggers.com/a-small-introduction-to-the-rocr-package/
+        predcat <- prediction(stepwise.predict.ROC.cat.2,
+                              MSLTcc_ROC_cat[,i])
+        perfcat <- performance(predcat,"tpr","fpr")
+        opt.cut = function(perf, pred) {
+            cut.ind = mapply(FUN=function(x, y, p){
+                d = (x - 0)^2 + (y-1)^2
+                ind = which(d == min(d))
+                c(sensitivity = y[[ind]],
+                  specificity = 1-x[[ind]],
+                  cutoff = p[[ind]])
+            }, perf@x.values, perf@y.values, pred@cutoffs)
+        }
+        print(opt.cut(perfcat, predcat))
+        
+        #Now attempt to get a cutpoint with the category-specific costs
+        cost.perf = performance(predcat,
+                                "cost",
+                                cost.fp = costmat[1,i],
+                                cost.fn = costmat[2,i])
+        roc.perf = performance(predcat,measure="tpr",x.measure="fpr")
+        plot(roc.perf); abline(a=0,b=1)
+        plot(cost.perf)
+        catcut <- opt.cut(cost.perf,predcat)[3]
+        #catcut <- predcat@cutoffs[[1]][which.min(cost.perf@y.values[[1]])]
+        TPFPcut <- opt.cut(roc.perf,predcat)[3]
+        catthresh <- (-log(1/TPFPcut - 1) - beta0)/beta1
+        
+        rocplot = function(stepwise.predict.ROC.cat.2,truth, ...) {
+            predob=prediction(stepwise.predict.ROC.cat.2,truth)
+            perf=performance(predob,"tpr","fpr")
+            auc=performance(predob,"auc")@y.values
+            plot(perf,main = auc)
+            plot(perf, colorize=T)
+            plot(perf, avg="threshold", spread.estimate="stddev", colorize=T)
+        }
+        
+        setwd(paste(dirpath,"Stepwise_ROCplots",sep="/"))
+        
+        png(paste(j,"_ROC_",i,"vOther_color%02d.png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+        rocplot(stepwise.predict.ROC.cat.2, MSLTcc_ROC_cat[,i])
+        dev.off()
+        
+        stepwise.rocCurve.cat <- roc(response = MSLTcc_ROC_cat[,i],
+                                     predictor = stepwise.predict.ROC.cat.2,
+                                     levels = rev(levels(MSLTcc_ROC_cat[,i])))
+        png(paste(j,"_ROC_",i,"vOther_bw%02d.png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+        plot(stepwise.rocCurve.cat)
+        dev.off()
+        paste("ROC curve AUC for",j,"in",i,"vs others:",round(auc(stepwise.rocCurve.cat),2))
+        
+        setwd(dirpath)
+        
+        cutthresh[k,"Category"] <- i
+        cutthresh[k,"Variable"] <- j
+        cutthresh[k,"AUC"] <- round(auc(stepwise.rocCurve.cat),2)
+        cutthresh[k,"Cutpoint"] <- round(catcut,2)
+        cutthresh[k,"Threshold"] <- round(catthresh,2)
+        k=k+1
+    }
+}
+write.table(cutthresh,file = "UNIvariate_thresholds.txt",row.names = F,quote = F)
+```
+
+```{r 8_20_17 creating functions for ROC, echo=FALSE}
+#library(ROCR)
+#library(grid)
+#library(broom)
+#library(caret)
+#library(tidyr)
+#library(dplyr)
+#library(scales)
+#library(ggplot2)
+#devtools::install_github('cttobin/ggthemr')
+#library(ggthemr)
+#library(ggthemes)
+#library(gridExtra)
+#library(data.table)
+
+# -----------------------------------------------------------------------------------
+# [AccuracyCutoffInfo] : 
+# Obtain the accuracy on the trainining and testing dataset.
+# for cutoff value ranging from .4 to .8 ( with a .05 increase )
+# @train   : your data.table or data.frame type training data ( assumes you have the predicted score in it ).
+# @test    : your data.table or data.frame type testing data
+# @predict : prediction's column name (assumes the same for training and testing set)
+# @actual  : actual results' column name
+# returns  : 1. data : a data.table with three columns.
+#            		   each row indicates the cutoff value and the accuracy for the 
+#            		   train and test set respectively.
+# 			 2. plot : plot that visualizes the data.table
+
+AccuracyCutoffInfo <- function( train, test, predict, actual )
+{
+	# change the cutoff value's range as you please 
+	cutoff <- seq( .4, .8, by = .05 )
+
+	accuracy <- lapply( cutoff, function(c)
+	{
+		# use the confusionMatrix from the caret package
+		cm_train <- confusionMatrix( as.numeric( train[[predict]] > c ), train[[actual]] )
+		cm_test  <- confusionMatrix( as.numeric( test[[predict]]  > c ), test[[actual]]  )
+			
+		dt <- data.table( cutoff = c,
+						  train  = cm_train$overall[["Accuracy"]],
+		 			      test   = cm_test$overall[["Accuracy"]] )
+		return(dt)
+	}) %>% rbindlist()
+
+	# visualize the accuracy of the train and test set for different cutoff value 
+	# accuracy in percentage.
+	accuracy_long <- gather( accuracy, "data", "accuracy", -1 )
+	
+	plot <- ggplot( accuracy_long, aes( cutoff, accuracy, group = data, color = data ) ) + 
+			geom_line( size = 1 ) + geom_point( size = 3 ) +
+			scale_y_continuous( label = percent ) +
+			ggtitle( "Train/Test Accuracy for Different Cutoff" )
+
+	return( list( data = accuracy, plot = plot ) )
+}
+
+
+# -----------------------------------------------------------------------------------
+# [ConfusionMatrixInfo] : 
+# Obtain the confusion matrix plot and data.table for a given
+# dataset that already consists the predicted score and actual outcome.
+# @data    : your data.table or data.frame type data that consists the column
+#            of the predicted score and actual outcome 
+# @predict : predicted score's column name
+# @actual  : actual results' column name
+# @cutoff  : cutoff value for the prediction score 
+# return   : 1. data : a data.table consisting of three column
+#            		   the first two stores the original value of the prediction and actual outcome from
+#			 		   the passed in data frame, the third indicates the type, which is after choosing the 
+#			 		   cutoff value, will this row be a true/false positive/ negative 
+#            2. plot : plot that visualizes the data.table 
+
+ConfusionMatrixInfo <- function( data, predict, actual, cutoff )
+{	
+	# extract the column ;
+	# relevel making 1 appears on the more commonly seen position in 
+	# a two by two confusion matrix	
+	predict <- data[[predict]]
+	actual  <- relevel( as.factor( data[[actual]] ), "1" )
+	
+	result <- data.table( actual = actual, predict = predict )
+
+	# caculating each pred falls into which category for the confusion matrix
+	result[ , type := ifelse( predict >= cutoff & actual == 1, "TP",
+					  ifelse( predict >= cutoff & actual == 0, "FP", 
+					  ifelse( predict <  cutoff & actual == 1, "FN", "TN" ) ) ) %>% as.factor() ]
+
+	# jittering : can spread the points along the x axis 
+	plot <- ggplot( result, aes( actual, predict, color = type ) ) + 
+			geom_violin( fill = "white", color = NA ) +
+			geom_jitter( shape = 1 ) + 
+			geom_hline( yintercept = cutoff, color = "blue", alpha = 0.6 ) + 
+			scale_y_continuous( limits = c( 0, 1 ) ) + 
+			scale_color_discrete( breaks = c( "TP", "FN", "FP", "TN" ) ) + # ordering of the legend 
+			guides( col = guide_legend( nrow = 2 ) ) + # adjust the legend to have two rows  
+			ggtitle( sprintf( "Confusion Matrix with Cutoff at %.2f", cutoff ) )
+
+	return( list( data = result, plot = plot ) )
+}
+
+# ------------------------------------------------------------------------------------
+# [ROCInfo] : 
+# Pass in the data that already consists the predicted score and actual outcome.
+# to obtain the ROC curve 
+# @data    : your data.table or data.frame type data that consists the column
+#            of the predicted score and actual outcome
+# @predict : predicted score's column name
+# @actual  : actual results' column name
+# @cost.fp : associated cost for a false positive 
+# @cost.fn : associated cost for a false negative 
+# return   : a list containing  
+#			 1. plot        : a side by side roc and cost plot, title showing optimal cutoff value
+# 				 	   		  title showing optimal cutoff, total cost, and area under the curve (auc)
+# 		     2. cutoff      : optimal cutoff value according to the specified fp/fn cost 
+#		     3. totalcost   : total cost according to the specified fp/fn cost
+#			 4. auc 		: area under the curve
+#		     5. sensitivity : TP / (TP + FN)
+#		     6. specificity : TN / (FP + TN)
+
+ROCInfo <- function( data, predict, actual, cost.fp, cost.fn )
+{
+	# calculate the values using the ROCR library
+	# true positive, false postive 
+	pred <- prediction( data[[predict]], data[[actual]] )
+	perf <- performance( pred, "tpr", "fpr" )
+	roc_dt <- data.frame( fpr = perf@x.values[[1]], tpr = perf@y.values[[1]] )
+
+	# cost with the specified false positive and false negative cost 
+	# false postive rate * number of negative instances * false positive cost + 
+	# false negative rate * number of positive instances * false negative cost
+	cost <- perf@x.values[[1]] * cost.fp * sum( data[[actual]] == 0 ) + 
+			( 1 - perf@y.values[[1]] ) * cost.fn * sum( data[[actual]] == 1 )
+
+	cost_dt <- data.frame( cutoff = pred@cutoffs[[1]], cost = cost )
+
+	# optimal cutoff value, and the corresponding true positive and false positive rate
+	best_index  <- which.min(cost)
+	best_cost   <- cost_dt[ best_index, "cost" ]
+	best_tpr    <- roc_dt[ best_index, "tpr" ]
+	best_fpr    <- roc_dt[ best_index, "fpr" ]
+	best_cutoff <- pred@cutoffs[[1]][ best_index ]
+	
+	# area under the curve
+	auc <- performance( pred, "auc" )@y.values[[1]]
+
+	# normalize the cost to assign colors to 1
+	normalize <- function(v) ( v - min(v) ) / diff( range(v) )
+	
+	# create color from a palette to assign to the 100 generated threshold between 0 ~ 1
+	# then normalize each cost and assign colors to it, the higher the blacker
+	# don't times it by 100, there will be 0 in the vector
+	col_ramp <- colorRampPalette( c( "green", "orange", "red", "black" ) )(100)   
+	col_by_cost <- col_ramp[ ceiling( normalize(cost) * 99 ) + 1 ]
+
+	roc_plot <- ggplot( roc_dt, aes( fpr, tpr ) ) + 
+				geom_line( color = rgb( 0, 0, 1, alpha = 0.3 ) ) +
+				geom_point( color = col_by_cost, size = 4, alpha = 0.2 ) + 
+				geom_segment( aes( x = 0, y = 0, xend = 1, yend = 1 ), alpha = 0.8, color = "royalblue" ) + 
+				labs( title = "ROC", x = "False Postive Rate", y = "True Positive Rate" ) +
+				geom_hline( yintercept = best_tpr, alpha = 0.8, linetype = "dashed", color = "steelblue4" ) +
+				geom_vline( xintercept = best_fpr, alpha = 0.8, linetype = "dashed", color = "steelblue4" )				
+
+	cost_plot <- ggplot( cost_dt, aes( cutoff, cost ) ) +
+				 geom_line( color = "blue", alpha = 0.5 ) +
+				 geom_point( color = col_by_cost, size = 4, alpha = 0.5 ) +
+				 ggtitle( "Cost" ) +
+				 scale_y_continuous( labels = comma ) +
+				 geom_vline( xintercept = best_cutoff, alpha = 0.8, linetype = "dashed", color = "steelblue4" )	
+
+	# the main title for the two arranged plot
+	sub_title <- sprintf( "Cutoff at %.2f - Total Cost = %d, AUC = %.3f", 
+						  best_cutoff, best_cost, auc )
+	
+	# arranged into a side by side plot
+	plot <- arrangeGrob( roc_plot, cost_plot, ncol = 2, 
+						 top = textGrob( sub_title, gp = gpar( fontsize = 16, fontface = "bold" ) ) )
+	
+	return( list( plot 		  = plot, 
+				  cutoff 	  = best_cutoff, 
+				  totalcost   = best_cost, 
+				  auc         = auc,
+				  sensitivity = best_tpr, 
+				  specificity = 1 - best_fpr ) )
+}
+```
+
+```{r 8_20_17}
+stepwiseTrain_ROC_NT1$prediction <- predict(multinomStep.ROC.NT1, newdata = stepwiseTrain_ROC_NT1, type = "probs") ###Not sure what's going on here, but I feel like you should be predicting on "new" data (e.g. the test set)
+stepwiseTest.train_ROC_NT1$prediction <- predict(multinomStep.ROC.NT1, newdata = stepwiseTest.train_ROC_NT1, type = "probs")
+
+# distribution of the prediction score grouped by known outcome
+#library(ggplot2)
+ggplot( stepwiseTrain_ROC_NT1, aes( prediction, color = as.factor(NT1) ) ) + 
+geom_density( size = 1 ) +
+ggtitle( "Training Set's Predicted Score" ) + 
+scale_color_economist( name = "data", labels = c( "negative", "positive" ) ) + 
+theme_economist()
+
+# Accuracy Info
+accuracy_info_NT1 <- AccuracyCutoffInfo( train = stepwiseTrain_ROC_NT1, test = stepwiseTest.train_ROC_NT1, predict = "prediction", actual = "NT1" )
+ggthemr("light")
+accuracy_info_NT1$plot
+
+# Confusion Matrix Info
+cm_info_NT1 <- ConfusionMatrixInfo( data = stepwiseTest.train_ROC_NT1, predict = "prediction", actual = "NT1", cutoff = .5)
+ggthemr("flat")
+cm_info_NT1$plot
+prop.table( table( stepwiseTest.train_ROC_NT1$NT1 ) )
+
+#Choosing Suitable Cutoff Value
+print(cm_info_NT1$data)
+
+cost_fn <- 200
+cost_fp <- 100
+roc_info_NT1 <- ROCInfo( data = cm_info_NT1$data, predict = "predict", 
+                     actual = "actual", cost.fp = 200, cost.fn = 100 )
+roc_info_NT1
+grid.draw(roc_info_NT1$plot)
+
+cm_info_NT1.2 <- ConfusionMatrixInfo( data = stepwiseTest.train_ROC_NT1, predict = "prediction", 
+                                actual = "NT1", cutoff = roc_info_NT1$cutoff )
+ggthemr("flat")
+cm_info_NT1.2$plot
+
+#---------------------------------------------------------
+#Interpretation and Reporting 
+# tidy from the broom package
+coefficient_NT1 <- tidy(multinomStep.ROC.NT1)[ , c( "term", "estimate", "statistic" ) ]
+# transfrom the coefficient to be in probability format 
+coefficient_NT1$estimate <- exp( coefficient_NT1$estimate )
+coefficient_NT1
+
+#***9_4 After splitting the data set into three sections, it seems like the cutoff may not apply as well
+col_class_NT1 <- sapply( stepwiseTest.train_ROC_NT1, class )[1:10]
+stepwiseTest.test_ROC_NT1$prediction <- predict(multinomStep.ROC.NT1, newdata=stepwiseTest.test_ROC_NT1, type="probs")
+stepwiseTest.test_ROC_NT1$prediction
+list(head(stepwiseTest.test_ROC_NT1), nrow(stepwiseTest.test_ROC_NT1))
+stepwiseTest.test_ROC_NT1_cutoff <- stepwiseTest.test_ROC_NT1[stepwiseTest.test_ROC_NT1$prediction >= roc_info_NT1$cutoff]
+list(head(stepwiseTest.test_ROC_NT1_cutoff), nrow(stepwiseTest.test_ROC_NT1_cutoff))
+
+median_Top <- stepwiseTest.test_ROC_NT1 %>% group_by(Top) %>% 
+                       summarise( prediction = median(prediction), count = n() )
+ggthemr("fresh")
+ggplot( median_Top, aes( Top, prediction, size = count ) ) + 
+geom_point() + theme( legend.position = "none" ) +
+labs( title = "Effect of SORREM on Chance of being NT1", y = "NT1 Probability", 
+      x = "Number of Naps" ) 
+
+median_TST-N1per <- stepwiseTest.test_ROC_NT1 %>% group_by(TST*N1per) %>% 
+                       summarise( prediction = median(prediction), count = n() )
+ggthemr("fresh")
+ggplot( median_TST-N1per, aes( TST*N1per, prediction, size = count ) ) + 
+geom_point() + theme( legend.position = "none" ) +
+labs( title = "Effect of TST*N1per on Chance of being NT1", y = "NT1 Probability", 
+      x = "TST*N1per" ) 
+summary(stepwiseTest.test_ROC_NT1)
+```
+
+```{r}
+
+#***9_4 this function below works perfectly well on graphing the Sleep Efficiency, but this website (of which I am basing this off of http://ethen8181.github.io/machine-learning/unbalanced/unbalanced.html#interpretation-and-reporting says that when dealing with something with a numeric index ranging from 0 to 1 like SE, we need to use an extra cut to split the SE into four groups
+#***Significant is because you can make figure with order of variable importance;, visually get clear understanding of what is happening within each category and the effect of the variables
+median_SE <- stepwiseTest.test_ROC_NT1 %>% group_by(SE) %>% 
+                       summarise( prediction = median(prediction), count = n() )
+ggthemr("fresh")
+ggplot( median_SE, aes( SE, prediction, size = count ) ) + 
+geom_point() + theme( legend.position = "none" ) +
+labs( title = "Effect of SE on Chance of being NT1", y = "NT1 Probability", 
+      x = "Sleep Efficiency" ) 
+
+#***9/4 The following below is what I am supposedly meant to do with the Sleep Efficiency, but the function cannot run due to the predict properties of the stepAIC function. I do not see anything wrong with the Sleep Efficiency graph that is plotted above, but I guess by splitting it into the quartiles the graph may be easier to intepret (I personally did not think it was worth spending time doing more extensive troubleshooting, but I did want to leave )
+stepwiseTest.test_ROC_NT1$SE <- cut( stepwiseTest.test_ROC_NT1$SE, breaks = quantile(stepwiseTest.test_ROC_NT1$SE), include.lowest = TRUE )
+median_SE <- data %>% group_by(SE) %>% 
+                       summarise( prediction = median(prediction), count = n() )
+
+ggplot( median_SE, aes( SE, prediction ) ) + 
+geom_point( aes( size = count ), color = "royalblue3" ) + 
+theme( legend.position = "none" ) +
+labs( title = "Effect of SE on Chance of being NT1", y = "NT1 Probability", 
+      x = "Sleep Efficiency" )
+
+ggplot( stepwiseTest.test_ROC_NT1, aes( prediction, SE ) ) + 
+geom_point() + 
+ggtitle( "SE v.s. Probability to be NT1" )
+
+result <- data %>% 
+          mutate( priority = prediction * SE ) %>%
+          mutate( id = rownames(stepwiseTest.test_ROC_NT1) ) %>%
+          arrange( desc(priority) )
+head(result)
+
+```

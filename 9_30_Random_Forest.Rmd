@@ -1,0 +1,814 @@
+---
+title: "Random Forest.Rmd"
+author: "Logan Schneider"
+date: "September 30, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+```{r FYI, echo=FALSE}
+#print("Analyses perfomed using:")
+#R.Version()$version.string
+print("randomForest, RColorBrewer, pROC, dplyr, ggraph, igraph, e1071, caret, ggplot2, car, agricolae")
+library(randomForest)
+library(RColorBrewer)
+library(pROC)
+library(dplyr)
+library(ggraph)
+library(igraph)
+library(e1071)
+library(caret)
+library(ggplot2)
+library(car)
+library(agricolae)
+print("Please use the following citation information")
+citation()
+
+sessionInfo()
+```
+
+```{r}
+#library(randomForest)
+setwd("C:/Users/xj901087/Dropbox/Stanford_Summer_Student")
+MSLT <- read.csv("MASTER4R.csv")
+summary(MSLT)
+
+head(MSLT)
+levels(MSLT$diagnosis)
+MSLT$nom <- factor(MSLT$diagnosis)
+levels(MSLT$nom)
+MSLT$diagnosis2 <- relevel(MSLT$nom, ref = "4")
+#remove hypocretin measurement as it shouldn't be included in the models
+MSLTsub <- MSLT[,-2]
+#now need to remove incomplete cases from the normal controls
+nc<-MSLTsub[which(MSLTsub$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew<-rbind.data.frame(MSLTsub[which(MSLTsub$diagnosis != 4),],ncomplete)
+#defining categories by name and re-leveling to NC as the baseline
+MSLTcat <- MSLTnew
+MSLTcat$Dx <- "NA"
+MSLTcat[which(MSLTcat$diagnosis == 1),"Dx"] <- "NT1"
+MSLTcat[which(MSLTcat$diagnosis == 2),"Dx"] <- "NT2"
+MSLTcat[which(MSLTcat$diagnosis == 3),"Dx"] <- "IH"
+MSLTcat[which(MSLTcat$diagnosis == 4),"Dx"] <- "NC"
+MSLTcat$nom <- factor(MSLTcat$Dx)
+MSLTcat$diagnosis2 <- relevel(MSLTcat$nom, ref = "NC")
+summary(MSLTcat)
+#subsetting for model creation
+MSLTglmnet <- MSLTcat[,c(28,2,4,7,8,10,12,14,16,17)] 
+MSLTcc <- MSLTglmnet[complete.cases(MSLTglmnet),]
+summary(MSLTcc)
+write.csv(MSLTcc,"CCdata4demographicsCTSvars.csv")
+```
+
+```{r define training (5/8) and test/hold-out sets (3/8), echo=FALSE}
+#set.seed(123)
+#train=sample(1:nrow(MSLTcc),round(0.625*nrow(MSLTcc)))
+#rfTrain = MSLTcc[train,]
+#rfTrain
+#rfTest=MSLTcc[-train,]
+
+set.seed(123)
+trainpart <- createDataPartition(MSLTcc$diagnosis2,
+                                 times=1,
+                                 p=0.625,
+                                 list=F)
+rfTrain <- MSLTcc[trainpart,]
+summary(rfTrain)
+rfTest <- MSLTcc[-trainpart,]
+summary(rfTest)
+```
+
+```{r random forest model on TRAINing set}
+rf.mslt=randomForest(diagnosis2~.,
+                     data=rfTrain,
+                     importance=TRUE,
+                     do.trace=100,
+                     ntree=1000,
+                     proximity=TRUE)
+#Importance assesses importance of predictors 
+#A semi-verbose output {do.trace = 100} allows a brief look at the trees
+#ntree to a 1000 because that was the parameter for gbm (therefore it ensures that the input row gets predicted a few times); best iteration from GBM was ~364, so this is a reasonable tree number, and convergence happens by 1000
+rf.mslt
+paste("random forest accuracy in TRAINING (no CV):",round(1-tail(rf.mslt$err.rate[,1],1),2))
+paste("random forest NC accuracy in TRAINING (no CV):",round(1-rf.mslt$confusion["NC","class.error"],2))
+paste("random forest IH accuracy in TRAINING (no CV):",round(1-rf.mslt$confusion["IH","class.error"],2))
+paste("random forest NT1 accuracy in TRAINING (no CV):",round(1-rf.mslt$confusion["NT1","class.error"],2))
+paste("random forest NT2 accuracy in TRAINING (no CV):",round(1-rf.mslt$confusion["NT2","class.error"],2))
+
+rf.predictions <- predict(rf.mslt, rfTest)
+rfCM <- confusionMatrix(rf.predictions, rfTest$diagnosis2)
+rfCM$table 
+paste("random forest accuracy in TEST data (no model CV):",round(rfCM$overall[[1]],2))
+paste("random forest tree p-value (no model CV):",rfCM$overall[[6]])
+rfCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="RandomForestRaw",
+                         "TESTaccuracy"=rfCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=rfCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=rfCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=rfCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=rfCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+```{r redundant?}
+rf.predict.test <- predict(object = rf.mslt, newdata = rfTest, type="class")
+rf.predict.test_solution <- data.frame(diagnosis2 = rfTest$diagnosis2, predictions = rf.predict.test)
+write.csv(rf.predict.test_solution, file = "rf.predict.test_solution.csv")
+```
+
+```{r determine variable importance in model}
+#Dotchart of variable importance in our random forest
+set.seed(54321)
+png("RandomForest_variable_importance.png",
+    width = 6,
+    height = 4,
+    units = 'in',
+    bg = "transparent",
+    res = 300)
+varImpPlot(rf.mslt,
+           sort = TRUE,
+           main = "Variable Importance Plot")
+dev.off()
+varinfluence <- as.data.frame(rf.mslt$importance[,c("MeanDecreaseAccuracy","MeanDecreaseGini")])
+write.csv(varinfluence[order(varinfluence$MeanDecreaseAccuracy,decreasing = T),],"RandomForest_variable_importance.csv")
+
+#Multi-dimensional Scaling Plot of Proximity 
+#this plots the proximity matrix, which identifies the closeness or nearness of cases, which may be useful for replacing missing data or finding outliers
+#require("RColorBrewer")
+png("RandomForest_MDSplot.png",
+    width = 16,
+    height = 16,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+MDSplot(rf.mslt, rfTrain$diagnosis2)
+#legend based on recommendations here: http://r.789695.n4.nabble.com/interpretation-of-MDS-plot-in-random-forest-td4681459.html
+legend("bottomright",legend=levels(rfTrain$diagnosis2),fill=brewer.pal(length(levels(rf.mslt$predicted)),"Set1"))
+dev.off()
+```
+
+```{r partial plots for all variables}
+dirpath <- getwd()
+if(!dir.exists("RandomForest_partialplots")) {
+    dir.create("RandomForest_partialplots")
+}
+#Another, better way to do get the partial plots:
+setwd(paste(dirpath,"RandomForest_partialplots",sep="/"))
+set.seed(101)
+imp <- importance(rf.mslt)
+impvar <- rownames(imp)[order(imp[, 1], decreasing=TRUE)]
+for (i in seq_along(impvar)) {
+    png(paste("NC random forest partial plot for ",impvar[i],".png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+    partialPlot(rf.mslt, rfTrain, impvar[i], xlab = impvar[i],
+                "NC", main = paste("NC Partial Dependence on",impvar[i]))
+    dev.off()
+}
+for (i in seq_along(impvar)) {
+    png(paste("NT1 random forest partial plot for ",impvar[i],".png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+    partialPlot(rf.mslt, rfTrain, impvar[i], xlab = impvar[i],
+                "NT1", main = paste("NT1 Partial Dependence on",impvar[i]))
+    dev.off()
+}
+for (i in seq_along(impvar)) {
+    png(paste("NT2 random forest partial plot for ",impvar[i],".png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+    partialPlot(rf.mslt, rfTrain, impvar[i], xlab = impvar[i],
+                "NT2", main = paste("NT2 Partial Dependence on",impvar[i]))
+    dev.off()
+}
+for (i in seq_along(impvar)) {
+    png(paste("IH random forest partial plot for ",impvar[i],".png",sep=""),
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+    partialPlot(rf.mslt, rfTrain, impvar[i], xlab = impvar[i],
+                "IH", main = paste("IH Partial Dependence on",impvar[i]))
+    dev.off()
+}
+setwd(dirpath)
+```
+
+```{r plot a tree with the minimum node number, for demonstration}
+#library(dplyr)
+#library(ggraph)
+#library(igraph)
+#using methods from: https://shiring.github.io/machine_learning/2017/03/16/rf_plot_ggraph
+tree_func <- function(final_model, 
+                      tree_num) {
+
+    # get tree by index
+    tree <- randomForest::getTree(final_model, 
+                                  k = tree_num, 
+                                  labelVar = TRUE) %>%
+    tibble::rownames_to_column() %>%
+    # make leaf split points to NA, so the 0s won't get plotted
+    mutate(`split point` = ifelse(is.na(prediction), `split point`, NA))
+  
+    # prepare data frame for graph
+    graph_frame <- data.frame(from = rep(tree$rowname, 2),
+                              to = c(tree$`left daughter`,
+                                     tree$`right daughter`))
+  
+    # convert to graph and delete the last node that we don't want to plot
+    graph <- graph_from_data_frame(graph_frame) %>%
+    delete_vertices("0")
+  
+    # set node labels
+    V(graph)$node_label <- gsub("_", " ", as.character(tree$`split var`))
+    V(graph)$leaf_label <- as.character(tree$prediction)
+    V(graph)$split <- as.character(round(tree$`split point`, digits = 2))
+  
+    # plot
+    plot <- ggraph(graph, 'dendrogram') + 
+    theme_bw() +
+    geom_edge_link() +
+    geom_node_point() +
+    geom_node_text(aes(label = node_label), na.rm = TRUE, repel = TRUE) +
+    geom_node_label(aes(label = split), vjust = 2.5, na.rm = TRUE, fill = "white") +
+    geom_node_label(aes(label = leaf_label, fill = leaf_label), na.rm = TRUE, 
+					repel = TRUE, colour = "white", fontface = "bold", show.legend = FALSE) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_rect(fill = "white"),
+          panel.border = element_blank(),
+          axis.line = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          plot.title = element_text(size = 18))
+  
+    print(plot)
+}
+
+
+set.seed(101)
+model_rf <- caret::train(diagnosis2~., data = rfTrain, method="rf") #caret:: isn't officially needed
+
+summary(model_rf$finalModel$forest)
+#get tree with minimal number of nodes
+tree_num <- which(model_rf$finalModel$forest$ndbigtree == min(model_rf$finalModel$forest$ndbigtree))
+
+#visualize the first tree
+rfTree <- getTree(rf.mslt, k=1) 
+print(rfTree)
+tree_func(final_model = model_rf$finalModel, 1)
+
+png("random forest smallest big tree.png",
+            width = 16,
+            height = 16,
+            units = 'in',
+            bg = "transparent",
+            res = 600)
+tree_func(final_model = model_rf$finalModel, tree_num)
+dev.off()
+```
+
+```{r tune for the best model}
+#size of trees (number of nodes) of the ensemble
+min(treesize(rf.mslt))
+max(treesize(rf.mslt))
+png("RandomForest tree size histogram - 71-116.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+hist(treesize(rf.mslt),main = "Tree size range 71-116")
+dev.off()
+
+#Tuning the structure to the best hyperparameters/previous distribution's parameters(numerical quantity that characterizes data set?) of the method via grid search:
+#library("e1071") # to access 'tune' method from e1071 package
+tuned.rfMSLT <- tune(randomForest,
+                     train.x = diagnosis2 ~ .,
+                     data = rfTrain,
+                     validation.x = rfTest)
+
+best.model <- tuned.rfMSLT$best.model
+rfTestPredictions <- predict(best.model, rfTest)
+table.rfTest <- table(rfTest$diagnosis2, rfTestPredictions)
+table.rfTest
+# computing overall error and accuracy
+error.rate <- 1 - sum(diag(as.matrix(table.rfTest))) / sum(table.rfTest)
+error.rate
+paste("random forest, tuned model accuracy in TEST data:",round(sum(diag(as.matrix(table.rfTest))) / sum(table.rfTest),2))
+
+rftunedCM <- confusionMatrix(rfTestPredictions, rfTest$diagnosis2)
+rftunedCM$table 
+paste("tuned random forest accuracy in TEST data (no model CV):",round(rftunedCM$overall[[1]],2))
+paste("tuned random forest tree p-value (no model CV):",rftunedCM$overall[[6]])
+rftunedCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="RandomForestTuned",
+                         "TESTaccuracy"=rftunedCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=rftunedCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=rftunedCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=rftunedCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=rftunedCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+```{r}
+summary(rf.mslt$err.rate)
+summary(rf.mslt$confusion)
+rf.mslt$confusion
+
+oob.err=double(9)
+NC.err=double(9)
+NT1.err=double(9)
+NT2.err=double(9)
+IH.err=double(9)
+test.err=double(9)
+ntree=1000
+oobcompare <- data.frame("TreeNum"=seq(1:ntree))
+tallcompare <- data.frame("TreeNum"=integer(),
+                          "mtry"=integer(),
+                          "OOB.error"=numeric())
+for(mtry in 1:9){
+    fit=randomForest(diagnosis2~.,data=MSLTcc,subset=trainpart,mtry=mtry,ntree=ntree)
+    oob.err[mtry]=fit$err.rate[ntree]
+    NC.err[mtry]=fit$confusion["NC","class.error"]
+    NT1.err[mtry]=fit$confusion["NT1","class.error"]
+    NT2.err[mtry]=fit$confusion["NT2","class.error"]
+    IH.err[mtry]=fit$confusion["IH","class.error"]
+    oobcompare[mtry+1] <- fit$err.rate[,"OOB"]
+    fortall <- data.frame("TreeNum"=seq(1:ntree),
+                          "mtry"=rep(mtry,ntree),
+                          "OOB.error"=fit$err.rate[,"OOB"])
+    tallcompare <- rbind(tallcompare,fortall)
+}
+
+png("Random Forest Error By Variable Number.png",
+    width = 4,
+    height = 4,
+    units = 'in',
+    bg = "transparent",
+    res = 300)
+matplot(1:mtry,
+        cbind(NC.err, NT1.err, NT2.err, IH.err, oob.err),
+        pch=20,
+        type="b",
+        xlab="Number of variables tried in model",
+        ylab="Error Rates for Different Categories")
+legend("left",
+       legend=c("IH", "NT1", "NT2", "OOB", "NC"),
+       pch=20,
+       col=c("4","2","3","5","1"),
+       cex=0.5,
+       bg="white")
+dev.off()
+varBYerror <- cbind(NC.err,oob.err,NT2.err,NT1.err,IH.err) #this demonstrates how the sample size impacts random forest predictions!
+write.csv(varBYerror,file = "RandomForestErrorByVariableNumber.csv")
+
+png("Random Forest Error By Variable Number - OOBzoom.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+matplot(1:mtry,oob.err,col=c("red","blue"),type="b",ylab="Out of Bag Error",xlab="Number of Predictor Variables Tried At Each Node")
+dev.off()
+png("Random Forest Error By Variable Number - NCzoom.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+matplot(1:mtry,NC.err,col=c("red","blue"),type="b",ylab="NC Classification Error",xlab="Number of Predictor Variables Tried At Each Node")
+dev.off()
+png("Random Forest Error By Variable Number - NT1zoom.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+matplot(1:mtry,NT1.err,col=c("red","blue"),type="b",ylab="NT1 Classification Error",xlab="Number of Predictor Variables Tried At Each Node")
+dev.off()
+png("Random Forest Error By Variable Number - NT2zoom.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+matplot(1:mtry,NT2.err,col=c("red","blue"),type="b",ylab="NT2 Classification Error",xlab="Number of Predictor Variables Tried At Each Node")
+dev.off()
+png("Random Forest Error By Variable Number - IHzoom.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+matplot(1:mtry,IH.err,col=c("red","blue"),type="b",ylab="IH Classification Error",xlab="Number of Predictor Variables Tried At Each Node")
+dev.off()
+#If using OOB error to evaluate model, 3 or 6 variables might be a good number to consider
+
+names(oobcompare) <- c("TreeNum","1","2","3","4","5","6","7","8","9")
+plot(oobcompare[,c(1,2)],pch=19,col=alpha("red",alpha = 0.5),ylab="")
+plot(oobcompare[,c(1,3)],pch=19,col=alpha("blue",alpha = 0.5),ylab="")
+tallcompare$mtry <- as.factor(tallcompare$mtry)
+str(tallcompare)
+#Plot OOB error based on trees
+png("Random Forest OOB error by by tree number.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+ggplot(tallcompare, aes(x=TreeNum, y=OOB.error, color=mtry)) +
+    geom_line( alpha=0.8) +
+    ylim(min(tallcompare$OOB.error),
+         (mean(tallcompare$OOB.error)+4*sd(tallcompare$OOB.error))) +
+    theme(legend.title = element_text(face="bold")) +
+    xlab("OOB error") + 
+    ylab("Tree number")
+dev.off()
+
+png("Random Forest category-specific error by by tree number.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+plot(rf.mslt,
+     log="y",
+     main="Random forest error by tree number")
+legend("bottomright",
+       colnames(rf.mslt$err.rate),
+       col=1:dim(rf.mslt$err.rate)[2],
+       cex=0.5,
+       fill=1:dim(rf.mslt$err.rate)[2]) #legend methods: https://stackoverflow.com/questions/20328452/legend-for-random-forest-plot-in-r
+dev.off()
+```
+
+```{r using rfcv feature of randomForest to decide optimal number of variables}
+#Usage of the Random Forest Cross-Validation (rfcv) feature, which shows the cross-validated prediction performance of models with sequentially reduced number of predictors (ranked by variable importance) via a nested cross-validation procedure
+set.seed(647)
+rfcvVARIABLES <- MSLTcc[2:ncol(MSLTcc)]
+result <- rfcv(rfcvVARIABLES, MSLTcc$diagnosis2, cv.fold=5, scale="log", step=0.5, recursive=FALSE)
+#NOTE the only demonstrated points are those that result in improvement in the model (if worsened, it's not included, via the nesting algorithm)
+png("Random Forest optimal variable number by nested CV.png",
+            width = 4,
+            height = 4,
+            units = 'in',
+            bg = "transparent",
+            res = 300)
+with(result, plot(n.var,
+                  1-error.cv,
+                  xlab="Number of variables",
+                  ylab="Accuracy",
+                  type="o",
+                  main="Optimal variable number by nested CV",
+                  lwd=2))
+dev.off()
+```
+
+```{r k-fold_cross-validation, echo=FALSE}
+#7/24 Cross Validation Fixed
+#library(caret)
+rfData= MSLTcc
+k.folds <- function(k) {
+    folds <- createFolds(rfTrain$diagnosis2,
+                         k = k,
+                         list = TRUE,
+                         returnTrain = TRUE)
+    for (i in 1:k) {
+        rf.mslt <- randomForest(diagnosis2~.,
+                                data=rfTrain[folds[[i]],],
+                                importance=TRUE,
+                                do.trace=100,
+                                ntree=1000,
+                                proximity=TRUE)
+        rf.cvPredictions <- predict(object = rf.mslt, newdata = rfTrain[-folds[[i]],])
+        rfAccuracies.dt <- c(rfAccuracies.dt, 
+                             confusionMatrix(rf.cvPredictions, 
+                                             rfTrain[-folds[[i]],]$diagnosis2)$overall[[1]])
+    }
+    rfAccuracies.dt
+}
+```
+
+```{r run the 5-fold cross validation}
+set.seed(567)
+rfAccuracies.dt <- c()
+rfAccuracies.dt <- k.folds(5) 
+rfAccuracies.dt
+mean.rfAccuracies <- mean(rfAccuracies.dt)
+mean.rfAccuracies
+sd.rfAccuracies <- sd(rfAccuracies.dt)
+sd.rfAccuracies
+```
+
+```{r 200 iterations of 5-fold CV}
+#####################################
+#Repeated K-Fold cross validation
+set.seed(567)
+v <- c()
+v <- replicate(200, k.folds(5))
+rfAccuracies.dt <- c()
+for (i in 1 : 200) { 
+  rfAccuracies.dt <- c(rfAccuracies.dt, v[,i])
+}
+setwd("C:/Users/xj901087/Dropbox")
+write.csv(rfAccuracies.dt, file = "randomforest_200accuracies.csv")
+
+mean.rfAccuracies <- mean(rfAccuracies.dt)
+lci <- mean(rfAccuracies.dt) - sd(rfAccuracies.dt) * 1.96
+uci <- mean(rfAccuracies.dt) + sd(rfAccuracies.dt) * 1.96
+lci
+uci
+mean.rfAccuracies
+sd(rfAccuracies.dt)
+```
+
+```{r Confidence Score Generation}
+set.seed(567)
+rf.mslt.trial=randomForest(diagnosis2~.,
+                           data=MSLTcc,
+                           importance=TRUE,
+                           do.trace=100,
+                           ntree=1000,
+                           proximity=TRUE,
+                           norm.votes = TRUE) ###9/30 The best method? or should we used tuned model?
+predict.rf.confscore <- rf.mslt.trial$votes 
+predict.rf.confscore #these are votes for each category from the gbm "forest", per individual
+setwd("C:/Users/xj901087/Dropbox")
+write.csv(predict.rf.confscore, file = "rf.msltcc_predictions.csv")
+
+#In fact, I think the appropriate way to do this is to use the chosen model to predict all individuals (train and test), not to generate a separate model and backward calculate
+RFconf <- as.data.frame(predict.rf.confscore)
+for(i in 1:nrow(RFconf)) {
+    #need to make sure it only assesses category columns, hence 1:4
+    pmax <- max(RFconf[i,1:4])
+    psecondmax <- sort(RFconf[i,1:4],
+                       partial=length(RFconf[i,1:4])-1)[[length(RFconf[i,1:4])-1]]
+    RFconf[i,"confidence_score"] <- ifelse(psecondmax==0,10,min((pmax/psecondmax - 1),10))
+}
+names(RFconf) <- c("NC","IH","NT1","NT2","confidence_score")
+
+#check confidence score by category
+NCsub <- RFconf[which(max.col(RFconf[,1:4])==1),]
+paste("NC confidence scores:",
+      round(mean(NCsub$confidence_score),2),
+      "+/-",
+      round(sd(NCsub$confidence_score),2))
+IHsub <- RFconf[which(max.col(RFconf[,1:4])==2),]
+paste("IH confidence scores:",
+      round(mean(IHsub$confidence_score),2),
+      "+/-",
+      round(sd(IHsub$confidence_score),2))
+NT1sub <- RFconf[which(max.col(RFconf[,1:4])==3),]
+paste("NT1 confidence scores:",
+      round(mean(NT1sub$confidence_score),2),
+      "+/-",
+      round(sd(NT1sub$confidence_score),2))
+NT2sub <- RFconf[which(max.col(RFconf[,1:4])==4),]
+paste("NT2 confidence scores:",
+      round(mean(NT2sub$confidence_score),2),
+      "+/-",
+      round(sd(NT2sub$confidence_score),2))
+```
+
+```{r ANOVA of confidence scores by category}
+#Check if these confidence scores are significantly different between groups
+talldata <- data.frame("category"=character(),"confidence_score"=numeric())
+NC4TD <- data.frame("category"=rep("NC",length.out=nrow(NCsub)),
+                    "confidence_score"=as.numeric(NCsub[,"confidence_score"]))
+IH4TD <- data.frame("category"=rep("IH",length.out=nrow(IHsub)),
+                    "confidence_score"=as.numeric(IHsub[,"confidence_score"]))
+NT14TD <- data.frame("category"=rep("NT1",length.out=nrow(NT1sub)),
+                     "confidence_score"=as.numeric(NT1sub[,"confidence_score"]))
+NT24TD <- data.frame("category"=rep("NT2",length.out=nrow(NT2sub)),
+                     "confidence_score"=as.numeric(NT2sub[,"confidence_score"]))
+talldata <- rbind(talldata,
+                  NC4TD,
+                  IH4TD,
+                  NT14TD,
+                  NT24TD)
+attach(talldata)
+Anova(lm(confidence_score ~ category,
+         data=talldata),
+      type="III")
+cat2conf <- aov(lm(confidence_score ~ category))
+cat2conf
+posthoc <- TukeyHSD(x=cat2conf, 'category', conf.level = 0.95)
+posthoc
+hsdcat2conf <- HSD.test(cat2conf, "category")
+hsdcat2conf
+#They are, except (suprisingly!) for no difference between NT1 & IH; again highlighting how random forest really is biased by the sample sizes of the categories
+sizeeffects <- as.data.frame(as.matrix(table(MSLTcc$diagnosis2)))
+sizeeffects$ConfScoreMean <- c(mean(NCsub$confidence_score),
+                               mean(IHsub$confidence_score),
+                               mean(NT1sub$confidence_score),
+                               mean(NT2sub$confidence_score))
+names(sizeeffects) <- c("SampleSize","ConfScoreMean")
+plot(sizeeffects)
+with(sizeeffects[1:4,], 
+     text(ConfScoreMean~SampleSize, labels = row.names(sizeeffects[1:4,]), pos = 4))
+```
+
+```{r prep data for ROC curve}
+setwd("C:/Users/xj901087/Dropbox/")
+MSLT_ROC <- read.csv("MASTER4R_ROCcurve.csv")
+summary(MSLT_ROC)
+head(MSLT_ROC)
+levels(MSLT_ROC$diagnosis)
+MSLT_ROC$nom <- factor(MSLT_ROC$diagnosis)
+levels(MSLT_ROC$nom)
+MSLT_ROC$diagnosis2 <- relevel(MSLT_ROC$nom, ref = "4")
+MSLTsub_ROC <- MSLT_ROC[,-6]
+nc<-MSLTsub_ROC[which(MSLTsub_ROC$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew_ROC<-rbind.data.frame(MSLTsub_ROC[which(MSLTsub_ROC$diagnosis != 4),],ncomplete)
+summary(MSLTnew_ROC)
+MSLTglmnet_ROC <- MSLTnew_ROC[,c(25,2,3,4,5,6,7,8,9,10,11,12,13,14)] 
+MSLTcc_ROC <- MSLTglmnet_ROC[complete.cases(MSLTglmnet_ROC),]
+summary(MSLTcc_ROC)
+
+#subsetting traing/test sets
+set.seed(123)
+ROCpart <- createDataPartition(MSLTcc_ROC$diagnosis2,
+                               times=1,
+                               p=0.625,
+                               list=F)
+rfTrain_ROC <- MSLTcc_ROC[ROCpart,]
+summary(rfTrain_ROC)
+rfTest_ROC <- MSLTcc_ROC[-ROCpart,]
+summary(rfTest_ROC)
+###9/30 as a note to fix, the summary of MSLTcc and MSLTcc_ROC highlights that we're dealing with different data sets (based on sample size differences)!
+
+#sent environmental training parameters
+fitControl = trainControl(method="cv", number=5, returnResamp = "all")
+```
+
+```{r NT1 Confidence Score}
+#NT1 vs. All
+MSLTcc_ROC_NT1<-MSLTcc_ROC[,c(2,6,7,8,9,10,11,12,13,14)]
+MSLTcc_ROC_NT1$nom <- factor(MSLTcc_ROC_NT1$NT1)
+levels(MSLTcc_ROC_NT1$nom)
+summary(MSLTcc_ROC_NT1)
+MSLTcc_ROC_NT1$NT1 <- relevel(MSLTcc_ROC_NT1$nom, ref = "0")
+MSLTcc_ROC_NT1 <- MSLTcc_ROC_NT1[-11]
+summary(MSLTcc_ROC_NT1)
+train_ROC_NT1=sample(1:nrow(MSLTcc_ROC_NT1),round(0.625*nrow(MSLTcc_ROC_NT1)))
+rfTrain_ROC_NT1 = MSLTcc_ROC_NT1[train_ROC_NT1,]
+rfTest_ROC_NT1=MSLTcc_ROC_NT1[-train_ROC_NT1,]
+
+#library(randomForest)
+rf.mslt.ROC.NT1=randomForest(NT1~.,data=rfTrain_ROC_NT1,importance=TRUE, do.trace=100, ntree=1000, proximity=TRUE)
+rf.predict.ROC.NT1 <- predict(rf.mslt.ROC.NT1, rfTest_ROC_NT1)
+str(rf.predict.ROC.NT1)
+confusionMatrix(rf.predict.ROC.NT1, rfTest_ROC_NT1$NT1)
+rf.probs.ROC.NT1 <- predict(rf.mslt.ROC.NT1, rfTest_ROC_NT1, type="prob")
+rf.probs.ROC.NT1
+#library(pROC)
+rf.rocCurve.NT1 <- roc(response = rfTest_ROC_NT1$NT1,
+                          predictor = rf.probs.ROC.NT1[, "1"], levels = rev(levels(rfTest_ROC_NT1$NT1)))
+plot(rf.rocCurve.NT1)
+auc(rf.rocCurve.NT1)
+```
+
+```{r NT2 Confidence Score}
+#NT2 vs. All
+MSLTcc_ROC_NT2<-MSLTcc_ROC[,c(3,6,7,8,9,10,11,12,13,14)]
+MSLTcc_ROC_NT2$nom <- factor(MSLTcc_ROC_NT2$NT2)
+levels(MSLTcc_ROC_NT2$nom)
+summary(MSLTcc_ROC_NT2)
+MSLTcc_ROC_NT2$NT2 <- relevel(MSLTcc_ROC_NT2$nom, ref = "0")
+MSLTcc_ROC_NT2 <- MSLTcc_ROC_NT2[-11]
+summary(MSLTcc_ROC_NT2)
+train_ROC_NT2=sample(1:nrow(MSLTcc_ROC_NT2),round(0.625*nrow(MSLTcc_ROC_NT2)))
+rfTrain_ROC_NT2 = MSLTcc_ROC_NT2[train_ROC_NT2,]
+rfTest_ROC_NT2=MSLTcc_ROC_NT2[-train_ROC_NT2,]
+
+#library(randomForest)
+rf.mslt.ROC.NT2=randomForest(NT2~.,data=rfTrain_ROC_NT2,importance=TRUE, do.trace=100, ntree=1000, proximity=TRUE)
+rf.predict.ROC.NT2 <- predict(rf.mslt.roc.NT2, rfTest_ROC_NT2)
+str(rf.predict.ROC.NT2)
+confusionMatrix(rf.predict.ROC.NT2, rfTest_ROC_NT2$NT2)
+rf.probs.ROC.NT2 <- predict(rf.mslt.ROC.NT2, rfTest_ROC_NT2, type="prob")
+rf.probs.ROC.NT2
+#library(pROC)
+rf.rocCurve.NT2 <- roc(response = rfTest_ROC_NT2$NT2,
+                       predictor = rf.probs.ROC.NT2[, "1"], levels = rev(levels(rfTest_ROC_NT2$NT2)))
+plot(rf.rocCurve.NT2)
+auc(rf.rocCurve.NT2)
+```
+
+```{r category (NT1, NT2, IH, NC) vs others}
+catlist <- names(MSLTcc_ROC)[2:5]
+MSLTccsub <- MSLTcc_ROC[,c(6:ncol(MSLTcc_ROC))]
+AUCout <- data.frame("ROC_category"=character(),
+                     "AUC"=numeric(),
+                     stringsAsFactors = F)
+k=1
+for (i in catlist) {
+    MSLTcc_ROC_cat <- cbind(MSLTcc_ROC[,i],MSLTccsub)
+    names(MSLTcc_ROC_cat)[1] <- i
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat$nom <- as.factor(MSLTcc_ROC_cat[,i])
+    levels(MSLTcc_ROC_cat$nom)
+    summary(MSLTcc_ROC_cat)
+    MSLTcc_ROC_cat[,i] <- relevel(MSLTcc_ROC_cat$nom, ref = "0")
+    MSLTcc_ROC_cat <- MSLTcc_ROC_cat[,-ncol(MSLTcc_ROC_cat)]
+    summary(MSLTcc_ROC_cat)
+    
+    #training/test partitioning
+    set.seed(123)
+    train_ROC_cat <- createDataPartition(MSLTcc_ROC_cat[,i],
+                                         times=1,
+                                         p=0.625,
+                                         list=F)
+    rfTrain_ROC_cat = MSLTcc_ROC_cat[train_ROC_cat,]
+    summary(rfTrain_ROC_cat)
+    rfTest_ROC_cat=MSLTcc_ROC_cat[-train_ROC_cat,]
+    summary(rfTest_ROC_cat)
+    
+    #cat_formula <- noquote(paste(i,"~ ."))...couldn't use because train wouldn't accept formula
+    trainprep <- rfTrain_ROC_cat
+    trainprep$Classes <- as.factor(ifelse(rfTrain_ROC_cat[,i]==1,i,"other"))
+    trainprep$Classes <- relevel(trainprep$Classes,ref="other")
+    xTrain <- trainprep[,c(2:(ncol(trainprep)-1))]
+    yTrain <- trainprep[,1]
+    rf.mslt.ROC.cat=randomForest(x=xTrain,
+                                 y=yTrain,
+                                 data=rfTrain_ROC_cat,
+                                 importance=TRUE,
+                                 do.trace=100,
+                                 ntree=1000,
+                                 proximity=TRUE)
+    rf.mslt.ROC.cat
+    rf.predict.ROC.cat <- predict(rf.mslt.ROC.cat, rfTest_ROC_cat)
+    str(rf.predict.ROC.cat)
+    confusionMatrix(rf.predict.ROC.cat, rfTest_ROC_cat[,i])
+    rf.probs.ROC.cat <- predict(rf.mslt.ROC.cat,
+                                rfTest_ROC_cat,
+                                type="prob")
+    #library(pROC)
+    rf.rocCurve.cat <- roc(response = rfTest_ROC_cat[,i],
+                           predictor = rf.probs.ROC.cat[, "1"],
+                           levels = rev(levels(rfTest_ROC_cat[,i])))
+   
+    png(paste("randomforestROC_",i,"vOther_bw%02d.png",sep=""),
+        width = 4,
+        height = 4,
+        units = 'in',
+        bg = "transparent",
+        res = 300)
+    plot(rf.rocCurve.cat)
+    dev.off()
+    paste("random forest ROC curve AUC for",i,"vs others:",round(auc(rf.rocCurve.cat),2))
+    
+    AUCout[k,"ROC_category"] <- i
+    AUCout[k,"AUC"] <- auc(rf.rocCurve.cat)
+    k=k+1
+}
+write.csv(AUCout,"randomforestAUCs.csv")
+```

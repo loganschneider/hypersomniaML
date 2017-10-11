@@ -1,0 +1,285 @@
+---
+title: "ANOVAandChiSq.Rmd"
+author: "Logan Schneider"
+date: "September 30, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+```{r FYI, echo=FALSE}
+#print("Analyses perfomed using:")
+#R.Version()$version.string
+print("car, agricolae")
+library(car)
+library(agricolae)
+print("Please use the following citation information")
+citation()
+
+sessionInfo()
+```
+
+```{r summary function, echo=FALSE}
+## Gives count, mean, standard deviation, standard error of the mean, and confidence interval (default 95%).
+##   data: a data frame.
+##   measurevar: the name of a column that contains the variable to be summariezed
+##   groupvars: a vector containing names of columns that contain grouping variables
+##   na.rm: a boolean that indicates whether to ignore NA's
+##   conf.interval: the percent range of the confidence interval (default is 95%)
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+    library(plyr)
+
+    # New version of length which can handle NA's: if na.rm==T, don't count them
+    length2 <- function (x, na.rm=FALSE) {
+        if (na.rm) sum(!is.na(x))
+        else       length(x)
+    }
+
+    # This does the summary. For each group's data frame, return a vector with
+    # N, mean, and sd
+    datac <- ddply(data, groupvars, .drop=.drop,
+      .fun = function(xx, col) {
+        c(N    = length2(xx[[col]], na.rm=na.rm),
+          mean = mean   (xx[[col]], na.rm=na.rm),
+          sd   = sd     (xx[[col]], na.rm=na.rm)
+        )
+      },
+      measurevar
+    )
+
+    # Rename the "mean" column    
+    datac <- rename(datac, c("mean" = measurevar))
+
+    datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+
+    # Confidence interval multiplier for standard error
+    # Calculate t-statistic for confidence interval: 
+    # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+    ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+    datac$ci <- datac$se * ciMult
+
+    return(datac)
+}
+```
+
+```{r prep data}
+data <- read.csv("200iter_total_accuracies.csv")
+summary(data)
+data <- data[,2:ncol(data)]
+talldata <- data.frame("model"=character(),"accuracies"=numeric())
+for(i in names(data)) {
+    forTD <- data.frame("model"=rep(i,length.out=length(na.omit(data[,i]))),
+                        "accuracies"=as.numeric(na.omit(data[,i])))
+    talldata <- rbind(talldata, forTD)
+}
+summary(talldata)
+str(talldata)
+attach(talldata)
+#Plot methods from here: http://www.cookbook-r.com/Graphs/Plotting_means_and_error_bars_(ggplot2)/#Helper functions
+plotsum <- summarySE(data=talldata,
+                     measurevar = "accuracies",
+                     groupvars = "model")
+plotsum$model <- factor(plotsum$model, levels = plotsum$model[order(plotsum$accuracies)])
+colnames(plotsum)[3] <- "Accuracy"
+```
+  
+```{r plot iters, echo=FALSE}
+library(ggplot2)
+png("200 iterations of 5-fold CV training accuracies.png", 
+    width = 6, 
+    height = 6, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 300)
+ggplot(plotsum, aes(x=model, y=Accuracy, color=Accuracy)) + 
+    geom_errorbar(aes(ymin=Accuracy-sd, ymax=Accuracy+sd), width=.2) +
+    geom_line() +
+    geom_point(size=3, shape=19) + # 21 is filled circle, so could add fill="white"
+    xlab("Model") +
+    ylab("Accuracy") +
+    ggtitle("Model Accuracies in Training Set from 200 Iterations of 5-fold CV") +
+    ylim(0.8,1) +
+    theme_bw()
+dev.off()
+ggplot(plotsum, aes(x=model, y=Accuracy, color=Accuracy)) + 
+    geom_errorbar(aes(ymin=Accuracy-sd, ymax=Accuracy+sd), width=.2) +
+    geom_line() +
+    geom_point(size=3, shape=19) + # 21 is filled circle, so could add fill="white"
+    xlab("Model") +
+    ylab("Accuracy") +
+    ggtitle("Model Accuracies in Training Set from 200 Iterations of 5-fold CV") +
+    ylim(0.8,1) +
+    theme_bw()
+```
+  
+```{r prep data for TEST accuracies}
+testacc <- read.csv("TESTaccuracies.csv")
+testacc4plot <- testacc[c("rpartCompleteCases",
+                          "TreePrunedBestNodeNum(8)",
+                          "RandomForestRaw",
+                          "StepFull",
+                          "gbmBestTreeByCV"),]
+testacc4plot <- rbind(testacc[which(testacc$Model=="rpartCompleteCases"),],
+                      testacc[which(testacc$Model=="TreePrunedBestNodeNum(8)"),],
+                      testacc[which(testacc$Model=="RandomForestRaw"),],
+                      testacc[which(testacc$Model=="StepFull"),],
+                      testacc[which(testacc$Model=="gbmBestTreeByCV"),])
+testacc4plot$Model <- c("rpart",
+                        "decisionTree",
+                        "randomForest",
+                        "step",
+                        "boost")
+row.names(testacc4plot) <- c("1","2","3","4","5")
+
+#establish same order as for the Training plot
+testacc4plot$Model <- factor(testacc4plot$Model,
+                             levels = testacc4plot$Model[order(plotsum$model)])
+colnames(testacc4plot)[2]<-"Accuracy"
+```
+  
+```{r plot test, echo=FALSE}
+png("Model accuracies in test sets.png", 
+    width = 6, 
+    height = 6, 
+    units = 'in', 
+    bg = "transparent", 
+    res = 300)
+ggplot(testacc4plot, aes(x=Model, y=Accuracy, color=Accuracy)) + 
+    geom_line() +
+    geom_point(size=3, shape=19) + # 21 is filled circle, so could add fill="white"
+    xlab("Model") +
+    ylab("Accuracy") +
+    ggtitle("Model Accuracies in Test Set") +
+    ylim(0.8,1) +
+    theme_bw()
+dev.off()
+ggplot(testacc4plot, aes(x=Model, y=Accuracy, color=Accuracy)) + 
+    geom_line() +
+    geom_point(size=3, shape=19) + # 21 is filled circle, so could add fill="white"
+    xlab("Model") +
+    ylab("Accuracy") +
+    ggtitle("Model Accuracies in Test Set") +
+    ylim(0.8,1) +
+    theme_bw()
+```
+  
+Check MODEL for significant differences in accuracy
+```{r model accuracies}
+Anova(lm(accuracies ~ model,
+         data=talldata),
+      type="III")
+model2acc <- aov(lm(accuracies ~ model))
+model2acc
+posthoc <- TukeyHSD(x=model2acc, 'model', conf.level = 0.95)
+posthoc
+hsdmodel2acc <- HSD.test(model2acc, "model")
+hsdmodel2acc
+```
+
+##Now assessing demographic differences between categories
+-Parameters of interest (to compare means by ANOVA and proportions by ChiSquare)  
+This data is used to compare category to potential variables/covariates to verify whether there are significant differences, a priori
+```{r prep for ANOVA/ChiSq, echo=FALSE}
+ANOVAandChi <- read.csv("CCdata4demographics.csv")
+ANOVAandChi <- droplevels(na.omit(ANOVAandChi))
+#Remove ID column ("X") from csv input
+ANOVAandChi <- ANOVAandChi[,c(2:ncol(ANOVAandChi))]
+str(ANOVAandChi)
+
+#Get columns that are factors for chi square and make sure all f and m are capital
+cols <- c("Gender","Asian","Black","Hispanic","Unknown","NativeAmerican","Other","PacificIslander","White","SOREMP0","SOREMP1","SOREMP2","SOREMP3","SOREMP4","SOREMP5")
+ANOVAandChi[cols] <- lapply(ANOVAandChi[cols], factor)
+str(ANOVAandChi)
+for(i in 1:nrow(ANOVAandChi)) {
+    ANOVAandChi[i,"Gender"] <- ifelse(ANOVAandChi[i,"Gender"]=="f" || ANOVAandChi[i,"Gender"]=="F","F","M")
+}
+ANOVAandChi[,"Gender"] <- droplevels(ANOVAandChi[,"Gender"])
+table(ANOVAandChi$Gender)
+facs <- sapply(ANOVAandChi,is.factor)
+CHInoANOVA <- na.omit(ANOVAandChi[,facs])
+
+#Get columns that aren't factors for ANOVA
+ANOVAnoCHI <- ANOVAandChi[,!facs]
+ANOVAnoCHI <- cbind(ANOVAandChi[,1],ANOVAnoCHI[,1:ncol(ANOVAnoCHI)])
+colnames(ANOVAnoCHI)[1] <- "diagnosis2"
+ANOVAnoCHI <- na.omit(ANOVAnoCHI)
+
+ANOVAlist <- names(ANOVAnoCHI)[2:ncol(ANOVAnoCHI)]
+CHIlist <- names(CHInoANOVA)[2:ncol(CHInoANOVA)]
+```
+  
+
+#Perform ANOVA to assess association/interaction of category and variables  
+Different groupings would be deemed "significant"
+```{r ANOVA category}
+attach(ANOVAandChi)
+for(i in ANOVAlist) {
+    formula <- noquote(paste(i," ~ diagnosis2"))
+    AVONA <- Anova(lm(formula,data=ANOVAnoCHI))
+    print(AVONA)
+    AofV <- aov(lm(formula,data=ANOVAnoCHI))
+    print(AofV)
+    hsdSxSi <- HSD.test(AofV, "diagnosis2")
+    print(hsdSxSi)
+}
+```
+  
+#Because ChiSquare revealed that the categorical variables (e.g. gender) caused the data set to shrink even more when ensuring complete cases, but most models (gbm, rpart, random forest, and trees) used just the continuous variables (i.e. more complete cases), that ANOVA is more relevant. So it's is done here:
+```{r ANOVA of CC for continuous variables}
+ANOVAcc <- read.csv("CCdata4demographicsCTSvars.csv")
+ANOVAcc <- ANOVAcc[,2:ncol(ANOVAcc)]
+ANOVAlist <- names(ANOVAcc[,2:ncol(ANOVAcc)])
+
+attach(ANOVAcc)
+for(i in ANOVAlist) {
+    formula <- noquote(paste(i," ~ diagnosis2"))
+    AVONA <- Anova(lm(formula,data=ANOVAcc))
+    print(AVONA)
+    AofV <- aov(lm(formula,data=ANOVAcc))
+    print(AofV)
+    hsdSxSi <- HSD.test(AofV, "diagnosis2")
+    print(hsdSxSi)
+}
+```
+
+#Perform ChiSquare/Fisher's test to assess for association between:  
+-Category  
+-AND relevant factors (gender, etc.)
+-NOTE: the sample sizes for ChiSq and Fisher test are smaller because complete cases with categorical variables (e.g. gender) were even more sparse
+```{r ChiSq/Fishers test}
+attach(ANOVAandChi)
+pvals <- data.frame("Variable"=character(),
+                    "Method"=character(),
+                    "pvalue"=numeric(),
+                    stringsAsFactors = F)
+for(i in CHIlist) {
+    print(i)
+    table <- table(CHInoANOVA[,"diagnosis2"], CHInoANOVA[,i])
+    print(table)
+    if(all(table>5)){
+        cattest <- chisq.test(table)
+        forpvals <- data.frame("Variable"=i,
+                               "Method"="Chi Squared",
+                               "pvalue"=cattest$p.value,
+                               stringsAsFactors = F)
+        pvals <- rbind(pvals, forpvals)
+    } else {
+        cattest <- fisher.test(table)
+        forpvals <- data.frame("Variable"=i,
+                               "Method"="Fisher's exact",
+                               "pvalue"=cattest$p.value,
+                               stringsAsFactors = F)
+        pvals <- rbind(pvals, forpvals)
+    }
+}
+write.csv(pvals,"ChiSquared_pvals.csv")
+
+SOREMPchi <- na.omit(ANOVAcc[,c("diagnosis2","Top")])
+table(SOREMPchi)
+#fisher.test(SOREMPchi)
+#chisq.test(SOREMPchi)
+```

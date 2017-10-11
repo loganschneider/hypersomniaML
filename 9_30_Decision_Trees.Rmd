@@ -1,0 +1,344 @@
+---
+title: "Decision Trees.Rmd"
+author: "Logan Schneider"
+date: "September 30, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown  
+```{r FYI, echo=FALSE}
+#print("Analyses perfomed using:")
+#R.Version()$version.string
+print("ISLR, tree, caret, maptree")
+library(ISLR)
+library(tree)
+library(caret)
+#rattle install required elaborate method for depedencies install on Mac: http://marcoghislanzoni.com/blog/2014/08/29/solved-installing-rattle-r-3-1-mac-os-x-10-9/
+library(rattle)
+library(maptree)
+print("Please use the following citation information")
+citation()
+
+sessionInfo()
+```
+
+```{r setup}
+#require(ISLR)
+#require(tree)
+setwd("C:/Users/xj901087/Dropbox/Stanford_Summer_Student")
+MSLT <- read.csv("MASTER4R.csv")
+attach(MSLT)
+plot(hcrt~jitter(diagnosis),pch=19)
+
+head(MSLT)
+levels(MSLT$diagnosis)
+MSLT$nom <- factor(MSLT$diagnosis)
+levels(MSLT$nom)
+MSLT$diagnosis2 <- relevel(MSLT$nom, ref = "4")
+#remove hypocretin measurement as it shouldn't be included in the models
+MSLTsub <- MSLT[,-2]
+#now need to remove incomplete cases from the normal controls
+nc<-MSLTsub[which(MSLTsub$diagnosis==4),]
+head(nc)
+tail(nc)
+summary(nc)
+str(nc)
+ncomplete <- nc[complete.cases(nc),]
+head(ncomplete)
+tail(ncomplete)
+summary(ncomplete)
+str(ncomplete)
+MSLTnew<-rbind.data.frame(MSLTsub[which(MSLTsub$diagnosis != 4),],ncomplete)
+#defining categories by name and re-leveling to NC as the baseline
+MSLTcat <- MSLTnew
+MSLTcat$Dx <- "NA"
+MSLTcat[which(MSLTcat$diagnosis == 1),"Dx"] <- "NT1"
+MSLTcat[which(MSLTcat$diagnosis == 2),"Dx"] <- "NT2"
+MSLTcat[which(MSLTcat$diagnosis == 3),"Dx"] <- "IH"
+MSLTcat[which(MSLTcat$diagnosis == 4),"Dx"] <- "NC"
+MSLTcat$nom <- factor(MSLTcat$Dx)
+MSLTcat$diagnosis2 <- relevel(MSLTcat$nom, ref = "NC")
+summary(MSLTcat)
+#subsetting for model creation
+MSLTglmnet <- MSLTcat[,c(28,2,4,7,8,10,12,14,16,17)] 
+#most models require complete cases (i.e. non-sparse/no-NA data)
+MSLTcc <- MSLTglmnet[complete.cases(MSLTglmnet),]
+summary(MSLTcc)
+```
+
+```{r define training (5/8) and test/hold-out sets (3/8), echo=FALSE}
+#set.seed(123)
+#train=sample(1:nrow(MSLTcc),round(0.625*nrow(MSLTcc)))
+#trainDecision = MSLTcc[train,]
+#summary(trainDecision)
+#testDecision=MSLTcc[-train,]
+#summary(testDecision)
+
+###this is better done with createDataPartition() because it ensures each category has an appropriate proportion between training and test
+#library(caret)
+set.seed(123)
+trainpart <- createDataPartition(MSLTcc$diagnosis2,
+                                 times=1,
+                                 p=0.625,
+                                 list=F)
+trainDecision <- MSLTcc[trainpart,]
+summary(trainDecision)
+testDecision <- MSLTcc[-trainpart,]
+summary(testDecision)
+```
+
+```{r Tree}
+#detach(package:tree)
+#library(tree)
+tree.MSLT = tree(diagnosis2~., data=trainDecision)
+tree.MSLT
+summary(tree.MSLT) 
+png("Full_DecisionTree.png",
+    width = 16,
+    height = 16,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+plot(tree.MSLT); text(tree.MSLT,pretty=0,cex=0.9)
+dev.off()
+png("Full_DecisionTree_pretty.png",
+    width = 16,
+    height = 16,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+draw.tree(tree.MSLT,cex=0.7,nodeinfo=T)
+dev.off()
+```
+
+```{r 7/31 data for Confidence Score}
+#detach(package:tree)
+#library(tree)
+tree.MSLT = tree(diagnosis2~., data=trainDecision)
+tree.pred2=predict(tree.MSLT, testDecision)
+tree.pred2
+
+tree.MSLT.test = tree(diagnosis2~., data=testDecision)
+tree.pred3=predict(tree.MSLT.test, trainDecision)
+tree.pred3
+total.tree.pred.2.3 <- rbind(tree.pred2,tree.pred3)
+total.tree.pred.2.3
+setwd("C:/Users/xj901087/Dropbox")
+write.csv(total.tree.pred.2.3, file = "decision_tree_total_predictions.csv")
+```
+
+```{r tree accuracy in TEST set}
+set.seed(101)
+tree.predictions <- predict(tree.MSLT, testDecision, type="class")
+tree.predictions
+treeCM <- confusionMatrix(tree.predictions, testDecision$diagnosis2)
+treeCM$table
+paste("decision tree accuracy in TEST data:",round(treeCM$overall[[1]],2))
+paste("decision tree p-value:",treeCM$overall[[6]])
+treeCM$byClass
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="TreeFull",
+                         "TESTaccuracy"=treeCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=treeCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=treeCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=treeCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=treeCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+
+tree.pred=predict(tree.MSLT, testDecision,type="class")
+table.tree.pred = with(testDecision,table(tree.pred,diagnosis2))
+table.tree.pred
+table.tree.pred.error.rate <- 1 - sum(diag(as.matrix(table.tree.pred))) / sum(table.tree.pred)
+1-table.tree.pred.error.rate #same as above...but a good check in general
+
+#The model is very bad at predicting the idiopathic hypersomnias, fantastic at predicting the normals, and ok at predicting the Narcolepsy 1s and 2s.
+```
+
+```{r distributional prediction}
+#7/24/17
+# Distributional prediction
+tree.predFirst <- predict(tree.MSLT, testDecision) # gives the probability for each class
+head(tree.predFirst) #use confidence score; similar way to the rpart
+
+pruned.decisionTree <- prune.tree(tree.MSLT, best=10) #chose ten terminal nodes as an arbitrary number; I wanted to see a simpler formation of the tree for reasonable clinical interpretation
+#Run with complexity parameter table
+plot(pruned.decisionTree); text(pruned.decisionTree,pretty=0)
+
+pruned.predictionTree <- predict(pruned.decisionTree, testDecision, type="class") # give the predicted class
+tree10CM <- confusionMatrix(pruned.predictionTree, testDecision$diagnosis2)
+tree10CM$table
+paste("decision tree accuracy in TEST data:",round(tree10CM$overall[[1]],2))
+paste("decision tree p-value:",tree10CM$overall[[6]])
+tree10CM$byClass
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"="TreePruned10nodes",
+                         "TESTaccuracy"=tree10CM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=tree10CM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=tree10CM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=tree10CM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=tree10CM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+
+summary(tree.MSLT) #note 19 nodes in untrimmed model (via automated cost-complexity management in the algorithm)
+#So see how the accuracies change as the node number changes from 2 terminal nodes to the optimal number of nodes determined by the model on "autopilot"
+#better method down below (via CV)
+sizebyacc <- data.frame("NodeNum"=numeric(),"Accuracy"=numeric())
+for (i in 2:19) {
+    prunesteps <- prune.tree(tree.MSLT, best=i)
+    prunepred <- predict(prunesteps, testDecision, type="class")
+    stepCM <- confusionMatrix(prunepred, testDecision$diagnosis2)
+    sizebyacc[i-1,"NodeNum"] <- i
+    sizebyacc[i-1,"Accuracy"] <- stepCM$overall[[1]]
+}
+sizebyacc
+plot(sizebyacc)
+```
+
+
+```{r using tree intrinsic cross validation to prune tree}
+set.seed(101)
+cv.MSLT=cv.tree(tree.MSLT,FUN=prune.misclass, K=5)
+cv.MSLT
+plot(cv.MSLT)
+cv.MSLT$dev
+best.sizeDecision<-cv.MSLT$size[which(cv.MSLT$dev==min(cv.MSLT$dev))]
+paste("Best number of nodes (by 5-fold CV):",best.sizeDecision)
+prune.MSLT=prune.misclass(tree.MSLT,best=best.sizeDecision)
+summary(prune.MSLT)
+prune.MSLT
+
+png("Pruned_DecisionTree.png",
+    width = 8,
+    height = 8,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+plot(prune.MSLT);text(prune.MSLT,pretty=0,cex=0.9)
+dev.off()
+png("Pruned_DecisionTree_pretty.png",
+    width = 8,
+    height = 8,
+    units = 'in',
+    bg = "transparent",
+    res = 600)
+draw.tree(prune.MSLT,cex=0.7,nodeinfo=T)
+dev.off()
+```
+
+```{r NEW evaluating pruned tree on data}
+set.seed(101)
+tree.pred2=predict(prune.MSLT,testDecision,type="class")
+table.tree.pred2 = with(testDecision,table(tree.pred2,diagnosis2))
+table.tree.pred2
+table.tree.pred.error.rate2 <- 1 - sum(diag(as.matrix(table.tree.pred2))) / sum(table.tree.pred2)
+1-table.tree.pred.error.rate2
+
+treeprunedCM <- confusionMatrix(tree.pred2, testDecision$diagnosis2)
+treeprunedCM$table
+paste("decision tree accuracy in TEST data:",round(treeprunedCM$overall[[1]],2))
+paste("decision tree p-value:",treeprunedCM$overall[[6]])
+treeprunedCM$byClass 
+
+testacc <- as.data.frame(read.csv("TESTaccuracies.csv"))
+fortestacc <- data.frame("Model"=paste("TreePrunedBestNodeNum(",best.sizeDecision,")",sep=""),
+                         "TESTaccuracy"=treeprunedCM$overall[[1]],
+                         "Date"=as.character(Sys.Date()),
+                         "NCaccuracy"=treeprunedCM$byClass[1,"Balanced Accuracy"],
+                         "IHaccuracy"=treeprunedCM$byClass[2,"Balanced Accuracy"],
+                         "NT1accuracy"=treeprunedCM$byClass[3,"Balanced Accuracy"],
+                         "NT2accuracy"=treeprunedCM$byClass[4,"Balanced Accuracy"],
+                         stringsAsFactors = F)
+testacc <- rbind(testacc,fortestacc)
+write.csv(testacc,"TESTaccuracies.csv",row.names = F)
+```
+
+
+```{r k-fold_cross-validation, echo=FALSE}
+###9/30 this may not need to be done as the tree algorithm has 5-fold CV in it (just did it above) for determining the optimal tree...maybe prune the whole tree-optimization process (include tree building and pruning) in the CV process. Alternate method provided below
+#library(caret)
+k.folds <- function(k) {
+    folds <- createFolds(trainDecision$diagnosis2,
+                         k = k,
+                         list = TRUE,
+                         returnTrain = TRUE)
+    for (i in 1:5) {
+        tree.MSLT=tree(diagnosis2~., data=trainDecision[folds[[i]],])
+        cv.tree.predictions <- predict(object = tree.MSLT,
+                                       newdata = trainDecision[-folds[[i]],],
+                                       type = "class")
+        treeAccuracies.dt <- c(treeAccuracies.dt, 
+                               confusionMatrix(cv.tree.predictions, 
+                               trainDecision[-folds[[i]],]$diagnosis2)$overall[[1]])
+  }
+  treeAccuracies.dt
+}
+```
+
+```{r k-fold function with pruning included}
+k.folds <- function(k) {
+    folds <- createFolds(trainDecision$diagnosis2,
+                         k = k,
+                         list = TRUE,
+                         returnTrain = TRUE)
+    for (i in 1:5) {
+        best.sizeDecision <- c()
+        tree.MSLT=tree(diagnosis2~., data=trainDecision[folds[[i]],])
+        cv.MSLT=cv.tree(tree.MSLT,FUN=prune.misclass, K=5)
+        #when >1 tree size is optimal, choose the smaller one
+        best.sizeDecision<-min(cv.MSLT$size[which(cv.MSLT$dev==min(cv.MSLT$dev))])
+        paste("Best number of nodes (by 5-fold CV):",best.sizeDecision)
+        prune.MSLT=prune.misclass(tree.MSLT,best=best.sizeDecision)
+        cv.tree.predictions <- predict(object = prune.MSLT,
+                                       newdata = trainDecision[-folds[[i]],],type = "class")
+        treeAccuracies.dt <- c(treeAccuracies.dt,
+                               confusionMatrix(cv.tree.predictions, 
+                               trainDecision[-folds[[i]],]$diagnosis2)$overall[[1]])
+    }
+    treeAccuracies.dt
+}
+```
+
+```{r run the k-fold cross-validation}
+set.seed(567)
+treeAccuracies.dt <- c()
+treeAccuracies.dt <- k.folds(5) 
+treeAccuracies.dt
+mean.treeAccuracies <- mean(treeAccuracies.dt)
+mean.treeAccuracies
+sd.treeAccuracies <- sd(treeAccuracies.dt)
+sd.treeAccuracies
+
+set.seed(567)
+v <- c()
+v <- replicate(200, k.folds(5))
+accuracies.dt <- c()
+for (i in 1 : 200) { 
+  accuracies.dt <- c(accuracies.dt, v[,i])
+}
+
+setwd("C:/Users/xj901087/Dropbox")
+write.csv(accuracies.dt, "decisiontree_200.csv")
+
+mean.accuracies <- mean(accuracies.dt)
+mean.accuracies
+lci.tree <- mean(accuracies.dt) - sd(accuracies.dt) * 1.96
+uci.tree <- mean(accuracies.dt) + sd(accuracies.dt) * 1.96
+lci.tree
+uci.tree
+paste("Decision tree TRAINING accuracies after 200 iterations of 5-fold CV: ",
+      round(mean.accuracies,2),
+      "+/-",
+      round(sd(accuracies.dt),2),sep="")
+```
